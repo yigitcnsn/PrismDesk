@@ -1,0 +1,153 @@
+# --- Secrets / credentials ---
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+secrets/
+**/secrets/
+credentials*
+*credentials*
+*secret*
+*secrets*
+*token*
+*api_key*
+*apikey*
+*_API_KEY*
+*_SECRET*
+*_TOKEN*
+auth.json
+service-account*.json
+**/google-credentials*.json
+
+# --- Local / private config overrides ---
+config/local.yaml
+config/local.yml
+config/*.local.yaml
+config/*.local.yml
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+pip-log.txt
+pip-delete-this-directory.txt
+
+# --- Virtual environments ---
+.venv/
+venv/
+ENV/
+env/
+.env/
+
+# --- Test / type / lint caches ---
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.dmypy.json
+dmypy.json
+.pytype/
+.pyre/
+.tox/
+.nox/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.cache/
+
+# --- Packaging / uv ---
+.uv/
+uv-cache/
+.python-version
+
+# --- Local media / examples (user photos stay private) ---
+examples/
+captures/
+recordings/
+*.HEIC
+*.heic
+*.HEIF
+*.heif
+
+# --- Vision / ML artifacts ---
+models/
+*.pt
+*.pth
+*.onnx
+*.h5
+*.pb
+*.tflite
+*.caffemodel
+runs/
+outputs/
+debug_dumps/
+*.npy
+*.npz
+
+# --- Homography / calibration dumps (often machine-local) ---
+config/homography*.npy
+config/*_matrix*.json
+!config/mat.yaml
+
+# --- Logs / temp ---
+*.log
+logs/
+tmp/
+temp/
+*.tmp
+*.temp
+*.bak
+*.swp
+*~
+
+# --- OS ---
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+Desktop.ini
+
+# --- IDE ---
+.idea/
+.vscode/
+*.code-workspace
+*.sublime-project
+*.sublime-workspace
+.project
+.classpath
+.settings/
+*.iml
+
+# --- Jupyter ---
+.ipynb_checkpoints/
+
+# --- Cursor / agent local ---
+.cursor/
