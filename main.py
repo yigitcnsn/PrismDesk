@@ -5,6 +5,8 @@ Modes:
   measure           Photo edge measurement (existing)
   calibrate-camera  Chessboard fisheye/pinhole calibration for USB cam
   hands             Live hand tracking preview (V4L2 MJPG → undistort → MediaPipe)
+  projector-list    List Wayland outputs via wlr-randr
+  projector-test    Fullscreen alignment pattern on HY300 (HDMI-A-1)
 """
 
 from __future__ import annotations
@@ -20,6 +22,8 @@ if str(ROOT) not in sys.path:
 
 DEFAULT_CAMERA_CONFIG = ROOT / "config" / "camera.yaml"
 EXAMPLE_CAMERA_CONFIG = ROOT / "config" / "camera.example.yaml"
+DEFAULT_PROJECTOR_CONFIG = ROOT / "config" / "projector.yaml"
+EXAMPLE_PROJECTOR_CONFIG = ROOT / "config" / "projector.example.yaml"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -63,6 +67,21 @@ def build_parser() -> argparse.ArgumentParser:
     )
     hands.add_argument("--device", type=int, default=None, help="Force V4L2 index")
     hands.add_argument("--no-undistort", action="store_true")
+
+    sub.add_parser("projector-list", help="List Wayland outputs (wlr-randr)")
+
+    proj = sub.add_parser("projector-test", help="Fullscreen test pattern on HY300")
+    proj.add_argument(
+        "--projector-config",
+        type=Path,
+        default=DEFAULT_PROJECTOR_CONFIG,
+        help="Projector YAML (default: config/projector.yaml)",
+    )
+    proj.add_argument(
+        "--output",
+        default=None,
+        help="Override output name (default from config: HDMI-A-1)",
+    )
     return parser
 
 
@@ -232,10 +251,79 @@ def cmd_hands(args: argparse.Namespace) -> int:
     return 0
 
 
+def _load_or_bootstrap_projector_config(path: Path):
+    from src.vision.projector import ProjectorConfig, load_projector_config
+
+    if path.is_file():
+        return load_projector_config(path)
+    if EXAMPLE_PROJECTOR_CONFIG.is_file():
+        print(f"{path} missing — loading defaults from {EXAMPLE_PROJECTOR_CONFIG}")
+        return load_projector_config(EXAMPLE_PROJECTOR_CONFIG)
+    return ProjectorConfig()
+
+
+def cmd_projector_list(_args: argparse.Namespace) -> int:
+    from src.vision.projector import list_outputs, wlr_randr_available
+
+    if not wlr_randr_available():
+        print("wlr-randr not found. Install it on Pi OS Wayland/labwc, or run under a Wayland session.")
+        return 1
+    outputs = list_outputs()
+    if not outputs:
+        print("No outputs parsed from wlr-randr.")
+        return 1
+    for out in outputs:
+        print(
+            f"{out.name}: {out.width}x{out.height}@{out.refresh_hz:.3f}Hz "
+            f"pos=({out.x},{out.y}) enabled={out.enabled} make={out.make!r}"
+        )
+        for w, h, hz in out.modes[:8]:
+            mark = " *" if (w, h) == (out.width, out.height) and abs(hz - out.refresh_hz) < 0.01 else ""
+            print(f"  mode {w}x{h}@{hz:.3f}Hz{mark}")
+        if len(out.modes) > 8:
+            print(f"  … {len(out.modes) - 8} more modes")
+    return 0
+
+
+def cmd_projector_test(args: argparse.Namespace) -> int:
+    import cv2
+
+    from src.vision.projector import ProjectorSurface, make_alignment_pattern
+
+    cfg = _load_or_bootstrap_projector_config(args.projector_config)
+    if args.output:
+        cfg.output_name = args.output
+
+    surface = ProjectorSurface(cfg)
+    try:
+        info = surface.prepare()
+        print(
+            f"Projector: {info.name} {info.width}x{info.height}@{info.refresh_hz:.3f}Hz "
+            f"pos=({info.x},{info.y})"
+        )
+        pattern = make_alignment_pattern(cfg.width, cfg.height)
+        surface.open()
+        print("Showing alignment pattern on projector — press q in the window to quit")
+        while True:
+            surface.show(pattern)
+            if cv2.waitKey(50) & 0xFF == ord("q"):
+                break
+    finally:
+        surface.close()
+        cv2.destroyAllWindows()
+    return 0
+
+
 def main() -> int:
     # Backward compatible: `python main.py photo.HEIC` still works as measure
     if len(sys.argv) > 1 and not sys.argv[1].startswith("-"):
-        known = {"measure", "calibrate-camera", "hands"}
+        known = {
+            "measure",
+            "calibrate-camera",
+            "hands",
+            "projector-list",
+            "projector-test",
+        }
         if sys.argv[1] not in known:
             sys.argv.insert(1, "measure")
 
@@ -247,6 +335,10 @@ def main() -> int:
         return cmd_calibrate_camera(args)
     if args.command == "hands":
         return cmd_hands(args)
+    if args.command == "projector-list":
+        return cmd_projector_list(args)
+    if args.command == "projector-test":
+        return cmd_projector_test(args)
     parser.error(f"Unknown command {args.command}")
     return 2
 

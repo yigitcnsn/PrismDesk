@@ -1,0 +1,16 @@
+# HY300 / desk projector (Pi 5 HDMI). Copy to config/projector.yaml (gitignored).
+
+# DRM / Wayland output name from `wlr-randr` or `ls /sys/class/drm/`
+# Pi 5 HDMI-0 → often HDMI-A-1 (card1-HDMI-A-1)
+output_name: HDMI-A-1
+
+width: 1920
+height: 1080
+# Prefer 50 Hz when EDID offers it (60 can fight USB cam capture on this setup)
+refresh_hz: 50
+
+# OpenCV window title used for the projection surface
+window_name: prismdesk-projector
+
+# If true, try `wlr-randr --output … --mode WxH@Hz` before opening the window
+apply_mode: true

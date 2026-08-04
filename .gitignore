@@ -28,6 +28,7 @@ config/local.yml
 config/*.local.yaml
 config/*.local.yml
 config/camera.yaml
+config/projector.yaml
 
 # --- Python ---
 __pycache__/

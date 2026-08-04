@@ -2,7 +2,7 @@
 
 Smoke-test lessons baked in:
 - Use integer device indices with cv2.CAP_V4L2 (never '/dev/videoN' strings on arm64).
-- Prefer MJPG @ 1080p30 so the camera ISP decodes.
+- Prefer MJPG @ 1080p50 so the camera ISP decodes (60 can be unstable on this USB cam).
 - Silence OpenCV backend spam via OPENCV_LOG_LEVEL.
 - Detect corrupt/empty frames and re-open with a short sleep to avoid CPU spin.
 """
@@ -32,7 +32,7 @@ class CameraConfig:
     device_indices: List[int] = field(default_factory=lambda: [1, 0, 2])
     width: int = 1920
     height: int = 1080
-    fps: int = 30
+    fps: int = 50
     fourcc: str = "MJPG"
     max_consecutive_bad_frames: int = 8
     reopen_sleep_sec: float = 0.35
@@ -54,7 +54,7 @@ def load_camera_config(path: str | Path) -> CameraConfig:
         device_indices=[int(i) for i in indices],
         width=int(raw.get("width", 1920)),
         height=int(raw.get("height", 1080)),
-        fps=int(raw.get("fps", 30)),
+        fps=int(raw.get("fps", 50)),
         fourcc=str(raw.get("fourcc", "MJPG")),
         max_consecutive_bad_frames=int(raw.get("max_consecutive_bad_frames", 8)),
         reopen_sleep_sec=float(raw.get("reopen_sleep_sec", 0.35)),

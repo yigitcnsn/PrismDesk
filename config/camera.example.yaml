@@ -7,8 +7,8 @@ device_indices: [1, 0, 2]
 
 width: 1920
 height: 1080
-fps: 30
-# FourCC: MJPG uses camera ISP (required for solid 1080p30 on cheap USB cams)
+fps: 50
+# FourCC: MJPG uses camera ISP (solid 1080p50 on cheap USB cams; avoid 60)
 fourcc: MJPG
 
 # Drop/recover
