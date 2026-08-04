@@ -1,114 +1,166 @@
-```markdown
-# PrismDesk 📐
+# PrismDesk
 
-An interactive, spatial AR workbench running on Raspberry Pi 5. It uses an overhead camera and projector to transform a physical desk into a dynamic, gesture-controlled UI backed by local AI and voice control.
+Spatial AR workbench for Raspberry Pi 5: overhead camera + HY300 projector turn a desk into a gesture-aware surface. Local AI / voice come later.
+
+**Repo:** https://github.com/yigitcnsn/PrismDesk
 
 ---
 
-## Architecture Overview
+## What’s working (alpha)
+
+| Mode | Command | Notes |
+|------|---------|--------|
+| Photo measure | `python main.py measure PHOTO` | Detect 40×30 cm mat → warp → silhouette → cm |
+| Camera calib | `python main.py calibrate-camera` | Chessboard → `config/camera.yaml` |
+| Hands | `python main.py hands [--project]` | MediaPipe Tasks HandLandmarker → optional HUD |
+| Desk (all-in-one) | `python main.py desk` | Mat + object measure + hands → projector HUD |
+| Projector list | `python main.py projector-list` | DRM / wlr-randr / xrandr discovery |
+| Projector test | `python main.py projector-test` | Fullscreen alignment pattern |
+
+Live HUD uses **ffplay/mpv** (pip OpenCV Qt/xcb often aborts on Pi). Mapping camera → projector is still **stretch**; true cam↔projector homography is next.
+
+---
+
+## Hardware (current desk)
+
+- Raspberry Pi 5
+- USB camera (V4L2 MJPG, prefer 1080p @ 50 FPS when stable)
+- HY300 projector on HDMI (`HDMI-A-1` / `card1-HDMI-A-1`)
+- Black reference mat **40×30 cm**
+- Desk ~159×65 cm; mount height ~186 cm (target for final overhead rig)
+
+---
+
+## Architecture (target)
 
 ```text
-               [ Raspberry Pi 5 (8GB) ]
+               [ Raspberry Pi 5 ]
                           │
          ┌────────────────┴────────────────┐
          ▼                                 ▼
-[ RPi Cam 3 Wide ]                 [ HY300 Projector ]
- (Desk & Hand Tracking)             (Spatial HUD Projection)
+[ Overhead camera ]                 [ HY300 projector ]
+ (mat / hands / objects)             (spatial HUD)
          │                                 │
          └─────────────┬───────────────────┘
                        ▼
-            [ PrismDesk Core Engine ]
-         ├── Vision: MediaPipe + Homography Matrix
-         ├── UI: Fast GPU Rendering (Raylib / Pygame)
-         └── Integrations: pi-llm & home-hub APIs
-
+            [ PrismDesk core ]
+         ├── Vision: MediaPipe + mat homography
+         ├── Measure: silhouette → shape metrics (cm)
+         ├── HUD: dark high-contrast overlay
+         └── Later: pi-llm, home-hub, voice
 ```
 
 ---
 
-## Roadmap & Milestones
-
-### Phase 1: Spatial Calibration
-
-- [ ] Set up project structure and virtual environment (`uv` / `venv`).
-- [ ] Mount RPi Camera 3 Wide and HY300 projector overhead (~186 cm above desk).
-- [ ] Implement $3 \times 3$ Homography matrix calibration (`src/calibration/homography.py`) to map camera pixels directly to projected coordinates.
-
-### Phase 2: Hand Tracking & Spatial UI
-
-- [ ] Build multi-threaded MediaPipe hand-tracking pipeline to hit 30+ FPS without choking the main thread.
-- [ ] Implement dark-mode rendering loop with high-contrast UI assets (`#00FFFF` Cyan / `#FF00FF` Magenta) designed specifically for light wood surfaces.
-- [ ] Add basic spatial input detection (hover, pinch, virtual button press).
-
-### Phase 3: Local Brain Integration
-
-- [ ] Wire async HTTP/WebSocket handlers to stream responses from local `pi-llm` (`Qwen 2.5 3B` via Ollama).
-- [ ] Add trigger endpoints to control local automation via `home-hub`.
-
-### Phase 4: Voice Control
-
-- [ ] Add lightweight wake-word engine (Porcupine/Precise) on a dedicated background thread.
-- [ ] Pipe audio into `whisper.cpp` (INT8 quantized) for low-latency STT.
-- [ ] Integrate `Piper TTS` to stream voice responses back through speakers.
-
----
-
-## Project Structure
+## Project layout
 
 ```text
 PrismDesk/
+├── main.py                 # CLI entry
+├── config/
+│   ├── mat.yaml            # 40×30 cm mat + detect knobs
+│   ├── camera.example.yaml # copy → camera.yaml (gitignored)
+│   └── projector.example.yaml
 ├── src/
-│   ├── vision/          # Camera capture & MediaPipe tracking
-│   ├── calibration/     # Homography calibration scripts
-│   ├── ui/              # Spatial HUD rendering loop
-│   ├── voice/           # Wake-word, STT, and TTS modules
-│   └── core/            # pi-llm and home-hub API bridges
-├── config/              # Camera settings & homography matrices
-├── docs/                # Mount specs & calibration guides
-├── main.py              # Application entry point
-└── requirements.txt
-
+│   ├── measure/            # Photo + mat-plane measurement
+│   └── vision/             # Camera, calib, hands, projector, desk HUD
+├── models/                 # hand_landmarker.task (downloaded, gitignored)
+├── requirements.txt
+└── README.md
 ```
 
 ---
 
-## Getting Started
+## Setup (Pi 5)
 
 ```bash
-
-```
-
-
-
-# Clone
-
-git clone [https://github.com/yigitcnsn/PrismDesk.git](https://github.com/yigitcnsn/PrismDesk.git)
+git clone https://github.com/yigitcnsn/PrismDesk.git
 cd PrismDesk
-
-# Setup environment
-
 python3 -m venv .venv
 source .venv/bin/activate
-
-# Install dependencies
-
 pip install -r requirements.txt
 
-# Run camera-projector calibration
+# System packages for live display / Wayland outputs
+sudo apt install -y ffmpeg mpv wlr-randr
 
-python3 src/calibration/homography.py
-
+cp config/camera.example.yaml config/camera.yaml
+cp config/projector.example.yaml config/projector.yaml
 ```
+
+On aarch64, prefer system OpenCV if pip Qt fails:
+
+```bash
+pip uninstall -y opencv-python opencv-python-headless
+sudo apt install -y python3-opencv
+```
+
+If SSH’ing into a desktop session:
+
+```bash
+export XDG_RUNTIME_DIR=/run/user/$(id -u)
+export WAYLAND_DISPLAY=wayland-0   # or DISPLAY=:0
+```
+
+---
+
+## Usage
+
+### Photo measurement
+
+```bash
+python main.py measure path/to/photo.HEIC
+# or JPEG/PNG
+```
+
+### Projector smoke test
+
+```bash
+python main.py projector-list
+python main.py projector-test
+```
+
+### Hands on projector
+
+```bash
+python main.py hands --project --capture 960x540 --track-size 480x270 --hud-size 640x360
+```
+
+### Desk: mat + object measure + hands
+
+```bash
+python main.py desk
+# defaults: capture 960x540, track 480x270, hud 640x360, object measure on
+# python main.py desk --no-object
+# python main.py desk --object-every 20
+```
+
+HUD shows mat outline, object edges/Ø/L×W in cm, hand skeleton, and index tip in mat-cm when the mat is locked. Keep hands off the mat while measuring if the silhouette gets confused.
+
+MediaPipe model downloads once to `models/hand_landmarker.task` on first run.
+
+---
+
+## Roadmap
+
+### Done / in progress
+
+- [x] Repo layout, venv, public-safe `.gitignore`
+- [x] Photo mat detect → warp → object silhouette measure (cm)
+- [x] USB camera capture + fisheye/pinhole calibration path
+- [x] MediaPipe Hands (Tasks API) + projector HUD via ffplay/mpv
+- [x] Live `desk` mode: mat + object measure + hands
+
+### Next
+
+- [ ] Camera ↔ projector homography (replace stretch mapping)
+- [ ] Higher live FPS (threading / lighter capture)
+- [ ] Final overhead mount (Cam 3 Wide + HY300)
+- [ ] Gesture widgets (hover / pinch / buttons)
+- [ ] `pi-llm` + `home-hub` bridges
+- [ ] Wake-word, STT, TTS
 
 ---
 
 ## License
 
-MIT © [Ahmet Yiğitcan Şen](https://www.google.com/search?q=https://github.com/yigitcnsn)
-
-```
-
-```
-
-```
-
+MIT © [Ahmet Yiğitcan Şen](https://github.com/yigitcnsn)
