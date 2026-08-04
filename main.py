@@ -117,6 +117,12 @@ def build_parser() -> argparse.ArgumentParser:
         default="1280x720",
         help="Projector HUD / video-sink size WxH (default 1280x720; use full for projector native)",
     )
+    hands.add_argument(
+        "--track-every",
+        type=int,
+        default=2,
+        help="Run MediaPipe every Nth frame; reuse last hands otherwise (default 2)",
+    )
 
     sub.add_parser("projector-list", help="List Wayland outputs (wlr-randr)")
 
@@ -353,9 +359,10 @@ def cmd_hands(args: argparse.Namespace) -> int:
         if tracker.infer_size
         else f"{w}x{h} (full)"
     )
+    track_every = max(1, int(args.track_every))
     print(
         f"Hands: camera index={idx} negotiated={w}x{h}@{fps:.1f} "
-        f"track={track_label} "
+        f"track={track_label} every={track_every} "
         f"undistort={'on' if und.enabled else 'off (calibrate-camera first)'} "
         f"project={'on' if project else 'off'} preview={'on' if want_preview else 'off'}"
     )
@@ -391,17 +398,22 @@ def cmd_hands(args: argparse.Namespace) -> int:
         print("q quit")
 
     frames = 0
+    track_frames = 0
     t0 = time.time()
     hud = None
+    hands = []
     try:
         while True:
             frame = cam.read()
             if und.enabled and not args.no_undistort:
                 frame = und.apply(frame)
-            hands = tracker.process(frame)
             frames += 1
+            if (frames - 1) % track_every == 0:
+                hands = tracker.process(frame)
+                track_frames += 1
             elapsed = max(time.time() - t0, 1e-6)
             fps_live = frames / elapsed
+            track_fps = track_frames / elapsed
 
             if project:
                 if hud is None or hud.shape[:2] != (hud_h, hud_w):
@@ -411,10 +423,11 @@ def cmd_hands(args: argparse.Namespace) -> int:
                 tracker.draw_hud(hud, hands, src_size=(frame.shape[1], frame.shape[0]))
                 cv2.putText(
                     hud,
-                    f"fps={fps_live:.1f}  hands={len(hands)}  track={track_label}",
+                    f"fps={fps_live:.1f}  track={track_fps:.1f}Hz/{track_every}  "
+                    f"hands={len(hands)}  {track_label}",
                     (24, 40),
                     cv2.FONT_HERSHEY_SIMPLEX,
-                    0.8,
+                    0.7,
                     (255, 255, 0),
                     2,
                 )
@@ -427,11 +440,11 @@ def cmd_hands(args: argparse.Namespace) -> int:
                 view = tracker.draw(frame, hands)
                 cv2.putText(
                     view,
-                    f"idx={idx}  fps={fps_live:.1f}  hands={len(hands)}  "
-                    f"track={track_label}  q=quit",
+                    f"idx={idx}  fps={fps_live:.1f}  track={track_fps:.1f}Hz/{track_every}  "
+                    f"hands={len(hands)}  q=quit",
                     (12, 32),
                     cv2.FONT_HERSHEY_SIMPLEX,
-                    0.7,
+                    0.65,
                     (0, 255, 255),
                     2,
                 )
@@ -439,7 +452,7 @@ def cmd_hands(args: argparse.Namespace) -> int:
                 if cv2.waitKey(1) & 0xFF == ord("q"):
                     break
             elif mpv is not None and not mpv.alive:
-                print("mpv closed — exiting")
+                print("video sink closed — exiting")
                 break
             else:
                 time.sleep(0.001)
