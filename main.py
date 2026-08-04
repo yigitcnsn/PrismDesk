@@ -271,6 +271,7 @@ def cmd_hands(args: argparse.Namespace) -> int:
     surface: ProjectorSurface | None = None
     mpv: MpvFrameSink | None = None
     proj_w = proj_h = 0
+    show = "mpv"
     if project:
         proj_cfg = _load_or_bootstrap_projector_config(args.projector_config)
         if args.output:
@@ -285,26 +286,7 @@ def cmd_hands(args: argparse.Namespace) -> int:
             f"Projector: {info.name} {info.width}x{info.height}@{info.refresh_hz:.3f}Hz "
             f"canvas={proj_w}x{proj_h} source={info.source}"
         )
-        show = args.show
-        if show == "auto":
-            show = "mpv"
-        if show == "mpv":
-            try:
-                mpv = MpvFrameSink(proj_w, proj_h, fps=float(cfg.fps or 30))
-            except Exception as exc:  # noqa: BLE001
-                print(f"mpv sink failed: {exc}")
-                if args.show == "mpv":
-                    print(opencv_gui_hint())
-                    return 1
-                print("falling back to OpenCV projector window…")
-                show = "opencv"
-        if show == "opencv":
-            try:
-                surface.open()
-            except Exception as exc:  # noqa: BLE001
-                print(opencv_gui_hint())
-                print(f"error: {exc}")
-                return 1
+        show = args.show if args.show != "auto" else "mpv"
 
     cam = Camera(cfg)
     tracker = HandTracker()
@@ -326,7 +308,31 @@ def cmd_hands(args: argparse.Namespace) -> int:
         f"undistort={'on' if und.enabled else 'off (calibrate-camera first)'} "
         f"project={'on' if project else 'off'} preview={'on' if want_preview else 'off'}"
     )
+
+    # Start mpv only after model + camera are ready — otherwise it exits on empty stdin.
     if project:
+        sink_fps = float(fps) if fps and fps > 1 else float(cfg.fps or 30)
+        if show == "mpv":
+            try:
+                mpv = MpvFrameSink(proj_w, proj_h, fps=sink_fps)
+            except Exception as exc:  # noqa: BLE001
+                print(f"mpv sink failed: {exc}")
+                if args.show == "mpv":
+                    print(opencv_gui_hint())
+                    tracker.close()
+                    cam.close()
+                    return 1
+                print("falling back to OpenCV projector window…")
+                show = "opencv"
+        if show == "opencv":
+            try:
+                surface.open()
+            except Exception as exc:  # noqa: BLE001
+                print(opencv_gui_hint())
+                print(f"error: {exc}")
+                tracker.close()
+                cam.close()
+                return 1
         print("HUD uses stretch mapping (cam↔projector homography later). Ctrl+C or q quit")
     else:
         print("q quit")

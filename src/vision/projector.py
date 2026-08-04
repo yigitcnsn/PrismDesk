@@ -622,13 +622,16 @@ class MpvFrameSink:
         self.height = int(height)
         self.fps = float(fps) if fps > 0 else 30.0
         self._frame_bytes = self.width * self.height * 3
+        self._err_path = Path("/tmp/prismdesk-mpv.log")
+        self._err_file = self._err_path.open("w", encoding="utf-8")
         cmd = [
             "mpv",
             "--fs",
             "--no-cache",
             "--untimed",
-            "--quiet",
-            "--no-terminal",
+            "--keep-open=yes",
+            "--force-window=immediate",
+            "--really-quiet",
             f"--demuxer-rawvideo-w={self.width}",
             f"--demuxer-rawvideo-h={self.height}",
             f"--demuxer-rawvideo-fps={self.fps:.3f}",
@@ -641,17 +644,33 @@ class MpvFrameSink:
             cmd,
             stdin=subprocess.PIPE,
             stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stderr=self._err_file,
             bufsize=0,
         )
+        # Give VO a moment; fail fast if display init died immediately.
+        time.sleep(0.15)
+        if not self.alive:
+            raise RuntimeError(
+                f"mpv exited immediately — see {self._err_path}: {self._read_err()}"
+            )
 
     @property
     def alive(self) -> bool:
         return self._proc.poll() is None
 
+    def _read_err(self) -> str:
+        try:
+            self._err_file.flush()
+            text = self._err_path.read_text(encoding="utf-8", errors="replace").strip()
+        except Exception:
+            return ""
+        return text[-800:] if text else ""
+
     def show(self, frame_bgr: np.ndarray) -> None:
         if not self.alive or self._proc.stdin is None:
-            raise RuntimeError("mpv process ended")
+            raise RuntimeError(
+                f"mpv process ended — see {self._err_path}: {self._read_err()}"
+            )
         h, w = frame_bgr.shape[:2]
         if (w, h) != (self.width, self.height):
             frame_bgr = cv2.resize(
@@ -662,7 +681,9 @@ class MpvFrameSink:
         try:
             self._proc.stdin.write(frame_bgr.tobytes())
         except BrokenPipeError as exc:
-            raise RuntimeError("mpv pipe closed") from exc
+            raise RuntimeError(
+                f"mpv pipe closed — see {self._err_path}: {self._read_err()}"
+            ) from exc
 
     def close(self) -> None:
         if self._proc.stdin is not None:
@@ -675,6 +696,10 @@ class MpvFrameSink:
         except subprocess.TimeoutExpired:
             self._proc.kill()
             self._proc.wait(timeout=1.0)
+        try:
+            self._err_file.close()
+        except Exception:
+            pass
 
     def __enter__(self) -> "MpvFrameSink":
         return self
