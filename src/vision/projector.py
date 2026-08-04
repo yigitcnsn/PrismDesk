@@ -609,3 +609,75 @@ def show_image_external(path: str | Path, tool: str = "mpv") -> int:
         + "; ".join(errors)
         + "). Install with: sudo apt install mpv"
     )
+
+
+class MpvFrameSink:
+    """Live fullscreen frames via mpv rawvideo stdin (reliable on Pi HDMI)."""
+
+    def __init__(self, width: int, height: int, fps: float = 30.0) -> None:
+        if not shutil.which("mpv"):
+            raise RuntimeError("mpv not found — install with: sudo apt install mpv")
+        ensure_gui_env()
+        self.width = int(width)
+        self.height = int(height)
+        self.fps = float(fps) if fps > 0 else 30.0
+        self._frame_bytes = self.width * self.height * 3
+        cmd = [
+            "mpv",
+            "--fs",
+            "--no-cache",
+            "--untimed",
+            "--quiet",
+            "--no-terminal",
+            f"--demuxer-rawvideo-w={self.width}",
+            f"--demuxer-rawvideo-h={self.height}",
+            f"--demuxer-rawvideo-fps={self.fps:.3f}",
+            "--demuxer-rawvideo-mp=bgr24",
+            "--demuxer=rawvideo",
+            "-",
+        ]
+        print("exec:", " ".join(cmd))
+        self._proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            bufsize=0,
+        )
+
+    @property
+    def alive(self) -> bool:
+        return self._proc.poll() is None
+
+    def show(self, frame_bgr: np.ndarray) -> None:
+        if not self.alive or self._proc.stdin is None:
+            raise RuntimeError("mpv process ended")
+        h, w = frame_bgr.shape[:2]
+        if (w, h) != (self.width, self.height):
+            frame_bgr = cv2.resize(
+                frame_bgr, (self.width, self.height), interpolation=cv2.INTER_LINEAR
+            )
+        if not frame_bgr.flags["C_CONTIGUOUS"] or frame_bgr.dtype != np.uint8:
+            frame_bgr = np.ascontiguousarray(frame_bgr, dtype=np.uint8)
+        try:
+            self._proc.stdin.write(frame_bgr.tobytes())
+        except BrokenPipeError as exc:
+            raise RuntimeError("mpv pipe closed") from exc
+
+    def close(self) -> None:
+        if self._proc.stdin is not None:
+            try:
+                self._proc.stdin.close()
+            except Exception:
+                pass
+        try:
+            self._proc.wait(timeout=2.0)
+        except subprocess.TimeoutExpired:
+            self._proc.kill()
+            self._proc.wait(timeout=1.0)
+
+    def __enter__(self) -> "MpvFrameSink":
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        self.close()

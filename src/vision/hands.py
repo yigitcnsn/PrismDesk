@@ -95,5 +95,66 @@ class HandTracker:
             )
         return out
 
+    def draw_hud(
+        self,
+        canvas_bgr: np.ndarray,
+        hands: List[HandResult],
+        *,
+        src_size: Optional[Tuple[int, int]] = None,
+    ) -> np.ndarray:
+        """Draw bright hand skeleton on a dark projector canvas.
+
+        Landmarks are mapped with a simple stretch from the camera frame to the
+        canvas (cam↔projector homography comes later). Prefer MediaPipe normalized
+        coords when raw_landmarks are present.
+        """
+        h, w = canvas_bgr.shape[:2]
+        bone = (0, 255, 255)
+        joint = (255, 0, 255)
+        tip_color = (0, 255, 0)
+        for hand in hands:
+            pts = _landmarks_to_canvas(hand, w, h, src_size)
+            if not pts:
+                continue
+            for a, b in self._mp_hands.HAND_CONNECTIONS:
+                if a < len(pts) and b < len(pts):
+                    cv2.line(canvas_bgr, pts[a], pts[b], bone, 3, cv2.LINE_AA)
+            for p in pts:
+                cv2.circle(canvas_bgr, p, 5, joint, -1, cv2.LINE_AA)
+            tip = pts[8] if len(pts) > 8 else pts[-1]
+            cv2.circle(canvas_bgr, tip, 14, tip_color, 2, cv2.LINE_AA)
+            cv2.putText(
+                canvas_bgr,
+                hand.handedness,
+                (tip[0] + 16, tip[1] - 10),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.8,
+                tip_color,
+                2,
+                cv2.LINE_AA,
+            )
+        return canvas_bgr
+
     def close(self) -> None:
         self._hands.close()
+
+
+def _landmarks_to_canvas(
+    hand: HandResult,
+    canvas_w: int,
+    canvas_h: int,
+    src_size: Optional[Tuple[int, int]],
+) -> List[Tuple[int, int]]:
+    if hand.raw_landmarks is not None:
+        return [
+            (int(lm.x * canvas_w), int(lm.y * canvas_h))
+            for lm in hand.raw_landmarks.landmark
+        ]
+    if not hand.landmarks_px:
+        return []
+    if src_size is None or src_size[0] <= 0 or src_size[1] <= 0:
+        return [(int(x), int(y)) for x, y in hand.landmarks_px]
+    sw, sh = src_size
+    sx = canvas_w / float(sw)
+    sy = canvas_h / float(sh)
+    return [(int(x * sx), int(y * sy)) for x, y in hand.landmarks_px]

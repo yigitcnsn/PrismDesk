@@ -4,7 +4,7 @@ PrismDesk entry point.
 Modes:
   measure           Photo edge measurement (existing)
   calibrate-camera  Chessboard fisheye/pinhole calibration for USB cam
-  hands             Live hand tracking preview (V4L2 MJPG → undistort → MediaPipe)
+  hands             Live hand tracking (optional --project HUD on HY300)
   projector-list    List Wayland outputs via wlr-randr
   projector-test    Fullscreen alignment pattern on HY300 (HDMI-A-1)
 """
@@ -58,7 +58,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Override distortion model",
     )
 
-    hands = sub.add_parser("hands", help="Live MediaPipe hand tracking preview")
+    hands = sub.add_parser(
+        "hands",
+        help="Live MediaPipe hand tracking (optionally project HUD to HY300)",
+    )
     hands.add_argument(
         "--camera-config",
         type=Path,
@@ -67,6 +70,38 @@ def build_parser() -> argparse.ArgumentParser:
     )
     hands.add_argument("--device", type=int, default=None, help="Force V4L2 index")
     hands.add_argument("--no-undistort", action="store_true")
+    hands.add_argument(
+        "--project",
+        action="store_true",
+        help="Project hand HUD fullscreen on HY300 (dark canvas + skeleton)",
+    )
+    hands.add_argument(
+        "--projector-config",
+        type=Path,
+        default=DEFAULT_PROJECTOR_CONFIG,
+        help="Projector YAML (default: config/projector.yaml)",
+    )
+    hands.add_argument(
+        "--output",
+        default=None,
+        help="Override projector output name (e.g. HDMI-A-1)",
+    )
+    hands.add_argument(
+        "--show",
+        choices=("auto", "mpv", "opencv"),
+        default="auto",
+        help="Projector sink when --project (default: auto → mpv then OpenCV)",
+    )
+    hands.add_argument(
+        "--preview",
+        action="store_true",
+        help="Also show local OpenCV camera preview (off by default with --project)",
+    )
+    hands.add_argument(
+        "--no-preview",
+        action="store_true",
+        help="Never open local OpenCV preview window",
+    )
 
     sub.add_parser("projector-list", help="List Wayland outputs (wlr-randr)")
 
@@ -204,9 +239,16 @@ def cmd_calibrate_camera(args: argparse.Namespace) -> int:
 
 def cmd_hands(args: argparse.Namespace) -> int:
     import cv2
+    import numpy as np
 
     from src.vision.camera import Camera
     from src.vision.hands import HandTracker
+    from src.vision.projector import (
+        MpvFrameSink,
+        ProjectorSurface,
+        ensure_gui_env,
+        opencv_gui_hint,
+    )
     from src.vision.undistort import Undistorter
 
     cfg = _load_or_bootstrap_camera_config(args.camera_config)
@@ -219,47 +261,142 @@ def cmd_hands(args: argparse.Namespace) -> int:
 
         und = Undistorter(CC())  # no K/D → passthrough
 
+    project = bool(args.project)
+    # With --project, skip local OpenCV window unless --preview (Qt/xcb often aborts on Pi).
+    want_preview = (not project and not args.no_preview) or (project and args.preview)
+    if args.no_preview:
+        want_preview = False
+
+    proj_cfg = None
+    surface: ProjectorSurface | None = None
+    mpv: MpvFrameSink | None = None
+    proj_w = proj_h = 0
+    if project:
+        proj_cfg = _load_or_bootstrap_projector_config(args.projector_config)
+        if args.output:
+            proj_cfg.output_name = args.output
+        env = ensure_gui_env()
+        if env.get("fixed"):
+            print("auto-set:", ", ".join(env["fixed"]))
+        surface = ProjectorSurface(proj_cfg)
+        info = surface.prepare()
+        proj_w, proj_h = int(proj_cfg.width), int(proj_cfg.height)
+        print(
+            f"Projector: {info.name} {info.width}x{info.height}@{info.refresh_hz:.3f}Hz "
+            f"canvas={proj_w}x{proj_h} source={info.source}"
+        )
+        show = args.show
+        if show == "auto":
+            show = "mpv"
+        if show == "mpv":
+            try:
+                mpv = MpvFrameSink(proj_w, proj_h, fps=float(cfg.fps or 30))
+            except Exception as exc:  # noqa: BLE001
+                print(f"mpv sink failed: {exc}")
+                if args.show == "mpv":
+                    print(opencv_gui_hint())
+                    return 1
+                print("falling back to OpenCV projector window…")
+                show = "opencv"
+        if show == "opencv":
+            try:
+                surface.open()
+            except Exception as exc:  # noqa: BLE001
+                print(opencv_gui_hint())
+                print(f"error: {exc}")
+                return 1
+
     cam = Camera(cfg)
     tracker = HandTracker()
     window = "prismdesk-hands"
-    cv2.namedWindow(window, cv2.WINDOW_NORMAL)
+    if want_preview:
+        try:
+            cv2.namedWindow(window, cv2.WINDOW_NORMAL)
+        except Exception as exc:  # noqa: BLE001
+            print(f"local preview unavailable: {exc}")
+            print(opencv_gui_hint())
+            want_preview = False
+            if not project:
+                return 1
 
     idx = cam.open()
     w, h, fps = cam.negotiated()
     print(
         f"Hands: camera index={idx} negotiated={w}x{h}@{fps:.1f} "
-        f"undistort={'on' if und.enabled else 'off (calibrate-camera first)'}"
+        f"undistort={'on' if und.enabled else 'off (calibrate-camera first)'} "
+        f"project={'on' if project else 'off'} preview={'on' if want_preview else 'off'}"
     )
-    print("q quit")
+    if project:
+        print("HUD uses stretch mapping (cam↔projector homography later). Ctrl+C or q quit")
+    else:
+        print("q quit")
 
     frames = 0
     t0 = time.time()
+    hud = None
     try:
         while True:
             frame = cam.read()
             if und.enabled and not args.no_undistort:
                 frame = und.apply(frame)
             hands = tracker.process(frame)
-            view = tracker.draw(frame, hands)
             frames += 1
             elapsed = max(time.time() - t0, 1e-6)
             fps_live = frames / elapsed
-            cv2.putText(
-                view,
-                f"idx={idx}  fps={fps_live:.1f}  hands={len(hands)}  q=quit",
-                (12, 32),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.7,
-                (0, 255, 255),
-                2,
-            )
-            cv2.imshow(window, view)
-            if cv2.waitKey(1) & 0xFF == ord("q"):
+
+            if project:
+                if hud is None or hud.shape[:2] != (proj_h, proj_w):
+                    hud = np.zeros((proj_h, proj_w, 3), dtype=np.uint8)
+                else:
+                    hud[:] = 0
+                tracker.draw_hud(hud, hands, src_size=(frame.shape[1], frame.shape[0]))
+                cv2.putText(
+                    hud,
+                    f"fps={fps_live:.1f}  hands={len(hands)}  stretch-map",
+                    (40, 48),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    1.0,
+                    (255, 255, 0),
+                    2,
+                )
+                if mpv is not None:
+                    mpv.show(hud)
+                elif surface is not None:
+                    surface.show(hud)
+
+            if want_preview:
+                view = tracker.draw(frame, hands)
+                cv2.putText(
+                    view,
+                    f"idx={idx}  fps={fps_live:.1f}  hands={len(hands)}  q=quit",
+                    (12, 32),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.7,
+                    (0, 255, 255),
+                    2,
+                )
+                cv2.imshow(window, view)
+                if cv2.waitKey(1) & 0xFF == ord("q"):
+                    break
+            elif mpv is not None and not mpv.alive:
+                print("mpv closed — exiting")
                 break
+            else:
+                time.sleep(0.001)
+    except KeyboardInterrupt:
+        print("\nInterrupted")
     finally:
         tracker.close()
         cam.close()
-        cv2.destroyAllWindows()
+        if mpv is not None:
+            mpv.close()
+        if surface is not None:
+            surface.close()
+        if want_preview:
+            try:
+                cv2.destroyAllWindows()
+            except Exception:
+                pass
     return 0
 
 
