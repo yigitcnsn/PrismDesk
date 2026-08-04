@@ -309,22 +309,24 @@ def cmd_hands(args: argparse.Namespace) -> int:
         f"project={'on' if project else 'off'} preview={'on' if want_preview else 'off'}"
     )
 
-    # Start mpv only after model + camera are ready — otherwise it exits on empty stdin.
+    # Start video sink only after model + camera are ready.
     if project:
         sink_fps = float(fps) if fps and fps > 1 else float(cfg.fps or 30)
         if show == "mpv":
             try:
                 mpv = MpvFrameSink(proj_w, proj_h, fps=sink_fps)
             except Exception as exc:  # noqa: BLE001
-                print(f"mpv sink failed: {exc}")
-                if args.show == "mpv":
-                    print(opencv_gui_hint())
-                    tracker.close()
-                    cam.close()
-                    return 1
-                print("falling back to OpenCV projector window…")
-                show = "opencv"
-        if show == "opencv":
+                print(f"video sink failed: {exc}")
+                print(
+                    "OpenCV fullscreen is disabled by default on Pi "
+                    "(pip Qt/xcb aborts). Fix the sink or install: sudo apt install ffmpeg"
+                )
+                print(opencv_gui_hint())
+                tracker.close()
+                cam.close()
+                return 1
+        elif show == "opencv":
+            # Explicit only — pip OpenCV often aborts with no catchable exception.
             try:
                 surface.open()
             except Exception as exc:  # noqa: BLE001

@@ -612,47 +612,115 @@ def show_image_external(path: str | Path, tool: str = "mpv") -> int:
 
 
 class MpvFrameSink:
-    """Live fullscreen frames via mpv rawvideo stdin (reliable on Pi HDMI)."""
+    """Live fullscreen BGR frames via ffplay/mpv rawvideo stdin.
+
+    Prefers ffplay (stable for pipes). Falls back to mpv. Writes a black
+    priming frame immediately so the demuxer does not EOF before video starts.
+    """
 
     def __init__(self, width: int, height: int, fps: float = 30.0) -> None:
-        if not shutil.which("mpv"):
-            raise RuntimeError("mpv not found — install with: sudo apt install mpv")
         ensure_gui_env()
         self.width = int(width)
         self.height = int(height)
         self.fps = float(fps) if fps > 0 else 30.0
         self._frame_bytes = self.width * self.height * 3
-        self._err_path = Path("/tmp/prismdesk-mpv.log")
+        self._err_path = Path("/tmp/prismdesk-video-sink.log")
         self._err_file = self._err_path.open("w", encoding="utf-8")
-        cmd = [
-            "mpv",
-            "--fs",
-            "--no-cache",
-            "--untimed",
-            "--keep-open=yes",
-            "--force-window=immediate",
-            "--really-quiet",
-            f"--demuxer-rawvideo-w={self.width}",
-            f"--demuxer-rawvideo-h={self.height}",
-            f"--demuxer-rawvideo-fps={self.fps:.3f}",
-            "--demuxer-rawvideo-mp=bgr24",
-            "--demuxer=rawvideo",
-            "-",
-        ]
-        print("exec:", " ".join(cmd))
-        self._proc = subprocess.Popen(
-            cmd,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.DEVNULL,
-            stderr=self._err_file,
-            bufsize=0,
+        self._backend = ""
+
+        black = np.zeros((self.height, self.width, 3), dtype=np.uint8)
+        last_err = ""
+        for backend, cmd in self._candidate_cmds():
+            print("exec:", " ".join(cmd))
+            try:
+                proc = subprocess.Popen(
+                    cmd,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.DEVNULL,
+                    stderr=self._err_file,
+                    bufsize=0,
+                )
+            except OSError as exc:
+                last_err = str(exc)
+                continue
+            self._proc = proc
+            self._backend = backend
+            try:
+                # Prime demuxer immediately — empty stdin makes players exit.
+                self._write_raw(black)
+            except Exception as exc:  # noqa: BLE001
+                last_err = f"{backend} prime failed: {exc}; {self._read_err()}"
+                self._kill_quiet()
+                continue
+            time.sleep(0.05)
+            if self.alive:
+                print(f"video sink: {backend}")
+                return
+            last_err = f"{backend} exited after prime: {self._read_err()}"
+            self._kill_quiet()
+
+        raise RuntimeError(
+            "No live video sink worked (tried ffplay, mpv). "
+            f"Install ffmpeg (ffplay) or mpv. Last error: {last_err} "
+            f"(log: {self._err_path})"
         )
-        # Give VO a moment; fail fast if display init died immediately.
-        time.sleep(0.15)
-        if not self.alive:
-            raise RuntimeError(
-                f"mpv exited immediately — see {self._err_path}: {self._read_err()}"
+
+    def _candidate_cmds(self) -> list[tuple[str, list[str]]]:
+        out: list[tuple[str, list[str]]] = []
+        size = f"{self.width}x{self.height}"
+        fps = f"{self.fps:.3f}"
+        if shutil.which("ffplay"):
+            out.append(
+                (
+                    "ffplay",
+                    [
+                        "ffplay",
+                        "-fs",
+                        "-an",
+                        "-sn",
+                        "-noborder",
+                        "-autoexit",
+                        "-loglevel",
+                        "error",
+                        "-f",
+                        "rawvideo",
+                        "-pixel_format",
+                        "bgr24",
+                        "-video_size",
+                        size,
+                        "-framerate",
+                        fps,
+                        "-i",
+                        "pipe:0",
+                    ],
+                )
             )
+        if shutil.which("mpv"):
+            out.append(
+                (
+                    "mpv",
+                    [
+                        "mpv",
+                        "--fs",
+                        "--no-cache",
+                        "--untimed",
+                        "--keep-open=yes",
+                        "--osc=no",
+                        "--msg-level=all=error",
+                        f"--demuxer-rawvideo-w={self.width}",
+                        f"--demuxer-rawvideo-h={self.height}",
+                        f"--demuxer-rawvideo-fps={fps}",
+                        "--demuxer-rawvideo-mp=bgr24",
+                        "--demuxer=rawvideo",
+                        "-",
+                    ],
+                )
+            )
+        if not out:
+            raise RuntimeError(
+                "Neither ffplay nor mpv found — sudo apt install ffmpeg mpv"
+            )
+        return out
 
     @property
     def alive(self) -> bool:
@@ -666,11 +734,21 @@ class MpvFrameSink:
             return ""
         return text[-800:] if text else ""
 
-    def show(self, frame_bgr: np.ndarray) -> None:
-        if not self.alive or self._proc.stdin is None:
-            raise RuntimeError(
-                f"mpv process ended — see {self._err_path}: {self._read_err()}"
-            )
+    def _kill_quiet(self) -> None:
+        try:
+            if self._proc.stdin:
+                self._proc.stdin.close()
+        except Exception:
+            pass
+        try:
+            self._proc.kill()
+            self._proc.wait(timeout=1.0)
+        except Exception:
+            pass
+
+    def _write_raw(self, frame_bgr: np.ndarray) -> None:
+        if self._proc.stdin is None:
+            raise RuntimeError("video sink stdin closed")
         h, w = frame_bgr.shape[:2]
         if (w, h) != (self.width, self.height):
             frame_bgr = cv2.resize(
@@ -678,14 +756,23 @@ class MpvFrameSink:
             )
         if not frame_bgr.flags["C_CONTIGUOUS"] or frame_bgr.dtype != np.uint8:
             frame_bgr = np.ascontiguousarray(frame_bgr, dtype=np.uint8)
+        self._proc.stdin.write(frame_bgr.tobytes())
+
+    def show(self, frame_bgr: np.ndarray) -> None:
+        if not self.alive:
+            raise RuntimeError(
+                f"{self._backend} ended — see {self._err_path}: {self._read_err()}"
+            )
         try:
-            self._proc.stdin.write(frame_bgr.tobytes())
+            self._write_raw(frame_bgr)
         except BrokenPipeError as exc:
             raise RuntimeError(
-                f"mpv pipe closed — see {self._err_path}: {self._read_err()}"
+                f"{self._backend} pipe closed — see {self._err_path}: {self._read_err()}"
             ) from exc
 
     def close(self) -> None:
+        if getattr(self, "_proc", None) is None:
+            return
         if self._proc.stdin is not None:
             try:
                 self._proc.stdin.close()
