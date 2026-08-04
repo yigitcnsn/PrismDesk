@@ -1,97 +1,78 @@
 """
 PrismDesk entry point.
 
-Runs the photo edge measurement utility:
-load photo → find mat → warp → analyze object (silhouette/colors/shape) → UI.
+Modes:
+  measure           Photo edge measurement (existing)
+  calibrate-camera  Chessboard fisheye/pinhole calibration for USB cam
+  hands             Live hand tracking preview (V4L2 MJPG → undistort → MediaPipe)
 """
 
 from __future__ import annotations
 
 import argparse
 import sys
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from src.measure.io import load_image
-from src.measure.mat import confirm_or_override_corners, detect_mat_corners, load_mat_config
-from src.measure.object import analyze_object
-from src.measure.outline import OutlineSession
-from src.measure.perspective import warp_to_mat_plane
+DEFAULT_CAMERA_CONFIG = ROOT / "config" / "camera.yaml"
+EXAMPLE_CAMERA_CONFIG = ROOT / "config" / "camera.example.yaml"
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Measure object edges on a known-size mat from a photo.",
-    )
-    parser.add_argument(
-        "photo",
-        type=Path,
-        help="Path to a photo (HEIC/JPEG/PNG) of the mat on the table",
-    )
-    parser.add_argument(
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="PrismDesk")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    measure = sub.add_parser("measure", help="Measure object edges from a photo")
+    measure.add_argument("photo", type=Path, help="Photo path (HEIC/JPEG/PNG)")
+    measure.add_argument(
         "--config",
         type=Path,
         default=ROOT / "config" / "mat.yaml",
-        help="Path to mat config YAML (default: config/mat.yaml)",
+        help="Mat config YAML",
     )
-    parser.add_argument(
-        "--auto-accept",
-        action="store_true",
-        help="Accept detected mat corners without confirmation UI",
+    measure.add_argument("--auto-accept", action="store_true")
+    measure.add_argument("--no-auto-object", action="store_true")
+
+    calib = sub.add_parser("calibrate-camera", help="Calibrate USB camera (chessboard)")
+    calib.add_argument(
+        "--camera-config",
+        type=Path,
+        default=DEFAULT_CAMERA_CONFIG,
+        help="Input/output camera YAML (default: config/camera.yaml)",
     )
-    parser.add_argument(
-        "--no-auto-object",
-        action="store_true",
-        help="Skip automatic object outline detection (manual clicks only)",
+    calib.add_argument("--device", type=int, default=None, help="Force V4L2 index")
+    calib.add_argument("--board", default="9x6", help="Inner corners WxH (default 9x6)")
+    calib.add_argument("--samples", type=int, default=20)
+    calib.add_argument(
+        "--model",
+        choices=("fisheye", "pinhole"),
+        default=None,
+        help="Override distortion model",
     )
-    return parser.parse_args()
+
+    hands = sub.add_parser("hands", help="Live MediaPipe hand tracking preview")
+    hands.add_argument(
+        "--camera-config",
+        type=Path,
+        default=DEFAULT_CAMERA_CONFIG,
+        help="Camera YAML with optional calibration",
+    )
+    hands.add_argument("--device", type=int, default=None, help="Force V4L2 index")
+    hands.add_argument("--no-undistort", action="store_true")
+    return parser
 
 
-def _print_analysis(result) -> None:
-    analysis = result.analysis
-    if analysis is None:
-        label = "Edge lengths (cm)" if result.closed else "Segment lengths (cm)"
-        print(f"{label}:")
-        for i, length in enumerate(result.segment_cm, start=1):
-            print(f"  E{i}: {length:.2f}")
-        print(f"Total path: {result.total_cm:.2f} cm")
-        return
+def cmd_measure(args: argparse.Namespace) -> int:
+    from src.measure.io import load_image
+    from src.measure.mat import confirm_or_override_corners, detect_mat_corners, load_mat_config
+    from src.measure.object import analyze_object
+    from src.measure.outline import OutlineSession
+    from src.measure.perspective import warp_to_mat_plane
 
-    print(f"Shape: {analysis.shape}")
-    if analysis.colors:
-        print("Colors: " + ", ".join(analysis.colors))
-
-    if analysis.shape == "circle":
-        print(f"  radius: {analysis.radius_cm:.2f} cm")
-        print(f"  diameter: {analysis.diameter_cm:.2f} cm")
-        return
-
-    if analysis.shape == "thin":
-        print(f"  length: {analysis.length_cm:.2f} cm")
-        print(f"  width: {analysis.width_cm:.2f} cm")
-
-    if analysis.edge_cm:
-        print("Edge lengths (cm):")
-        for i, length in enumerate(analysis.edge_cm, start=1):
-            print(f"  E{i}: {length:.2f}")
-
-    if analysis.fillet_radii_cm:
-        print("Fillet radii (cm):")
-        for i, fr in enumerate(analysis.fillet_radii_cm, start=1):
-            print(f"  F{i}: {fr:.2f}")
-
-    if result.segment_cm and not analysis.edge_cm:
-        print("Segment lengths (cm):")
-        for i, length in enumerate(result.segment_cm, start=1):
-            print(f"  E{i}: {length:.2f}")
-        print(f"Total path: {result.total_cm:.2f} cm")
-
-
-def main() -> int:
-    args = parse_args()
     config = load_mat_config(args.config)
     image = load_image(args.photo)
 
@@ -134,8 +115,140 @@ def main() -> int:
         print("Cancelled: no outline measured.")
         return 1
 
-    _print_analysis(result)
+    analysis = result.analysis
+    if analysis is None:
+        print("Segment lengths (cm):")
+        for i, length in enumerate(result.segment_cm, start=1):
+            print(f"  E{i}: {length:.2f}")
+        print(f"Total path: {result.total_cm:.2f} cm")
+        return 0
+
+    print(f"Shape: {analysis.shape}")
+    if analysis.colors:
+        print("Colors: " + ", ".join(analysis.colors))
+    if analysis.shape == "circle":
+        print(f"  radius: {analysis.radius_cm:.2f} cm")
+        print(f"  diameter: {analysis.diameter_cm:.2f} cm")
+    elif analysis.shape == "thin":
+        print(f"  length: {analysis.length_cm:.2f} cm")
+        print(f"  width: {analysis.width_cm:.2f} cm")
+    if analysis.edge_cm:
+        print("Edge lengths (cm):")
+        for i, length in enumerate(analysis.edge_cm, start=1):
+            print(f"  E{i}: {length:.2f}")
+    if analysis.fillet_radii_cm:
+        print("Fillet radii (cm):")
+        for i, fr in enumerate(analysis.fillet_radii_cm, start=1):
+            print(f"  F{i}: {fr:.2f}")
     return 0
+
+
+def _load_or_bootstrap_camera_config(path: Path):
+    from src.vision.camera import CameraConfig, load_camera_config
+
+    if path.is_file():
+        return load_camera_config(path)
+    if EXAMPLE_CAMERA_CONFIG.is_file():
+        print(f"{path} missing — loading defaults from {EXAMPLE_CAMERA_CONFIG}")
+        return load_camera_config(EXAMPLE_CAMERA_CONFIG)
+    return CameraConfig()
+
+
+def cmd_calibrate_camera(args: argparse.Namespace) -> int:
+    from src.vision.calibrate import run_calibration
+
+    cfg = _load_or_bootstrap_camera_config(args.camera_config)
+    if args.device is not None:
+        cfg.device_indices = [args.device] + [i for i in cfg.device_indices if i != args.device]
+    w_s, h_s = args.board.lower().split("x")
+    run_calibration(
+        cfg,
+        output_path=args.camera_config,
+        board_size=(int(w_s), int(h_s)),
+        target_samples=args.samples,
+        model=args.model,
+    )
+    return 0
+
+
+def cmd_hands(args: argparse.Namespace) -> int:
+    import cv2
+
+    from src.vision.camera import Camera
+    from src.vision.hands import HandTracker
+    from src.vision.undistort import Undistorter
+
+    cfg = _load_or_bootstrap_camera_config(args.camera_config)
+    if args.device is not None:
+        cfg.device_indices = [args.device] + [i for i in cfg.device_indices if i != args.device]
+
+    und = Undistorter(cfg)
+    if args.no_undistort:
+        from src.vision.camera import CameraConfig as CC
+
+        und = Undistorter(CC())  # no K/D → passthrough
+
+    cam = Camera(cfg)
+    tracker = HandTracker()
+    window = "prismdesk-hands"
+    cv2.namedWindow(window, cv2.WINDOW_NORMAL)
+
+    idx = cam.open()
+    w, h, fps = cam.negotiated()
+    print(
+        f"Hands: camera index={idx} negotiated={w}x{h}@{fps:.1f} "
+        f"undistort={'on' if und.enabled else 'off (calibrate-camera first)'}"
+    )
+    print("q quit")
+
+    frames = 0
+    t0 = time.time()
+    try:
+        while True:
+            frame = cam.read()
+            if und.enabled and not args.no_undistort:
+                frame = und.apply(frame)
+            hands = tracker.process(frame)
+            view = tracker.draw(frame, hands)
+            frames += 1
+            elapsed = max(time.time() - t0, 1e-6)
+            fps_live = frames / elapsed
+            cv2.putText(
+                view,
+                f"idx={idx}  fps={fps_live:.1f}  hands={len(hands)}  q=quit",
+                (12, 32),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.7,
+                (0, 255, 255),
+                2,
+            )
+            cv2.imshow(window, view)
+            if cv2.waitKey(1) & 0xFF == ord("q"):
+                break
+    finally:
+        tracker.close()
+        cam.close()
+        cv2.destroyAllWindows()
+    return 0
+
+
+def main() -> int:
+    # Backward compatible: `python main.py photo.HEIC` still works as measure
+    if len(sys.argv) > 1 and not sys.argv[1].startswith("-"):
+        known = {"measure", "calibrate-camera", "hands"}
+        if sys.argv[1] not in known:
+            sys.argv.insert(1, "measure")
+
+    parser = build_parser()
+    args = parser.parse_args()
+    if args.command == "measure":
+        return cmd_measure(args)
+    if args.command == "calibrate-camera":
+        return cmd_calibrate_camera(args)
+    if args.command == "hands":
+        return cmd_hands(args)
+    parser.error(f"Unknown command {args.command}")
+    return 2
 
 
 if __name__ == "__main__":

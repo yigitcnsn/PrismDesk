@@ -1,0 +1,24 @@
+# Local camera calibration + capture defaults for PrismDesk alpha.
+# Copy to config/camera.yaml and adjust after calibrate-camera.
+# config/camera.yaml is gitignored.
+
+# V4L2 device indices to try (USB enumeration can swap on boot)
+device_indices: [1, 0, 2]
+
+width: 1920
+height: 1080
+fps: 30
+# FourCC: MJPG uses camera ISP (required for solid 1080p30 on cheap USB cams)
+fourcc: MJPG
+
+# Drop/recover
+max_consecutive_bad_frames: 8
+reopen_sleep_sec: 0.35
+read_timeout_retries: 3
+
+# Fisheye / pinhole model: "fisheye" or "pinhole"
+model: fisheye
+# Filled by calibrate-camera (empty = skip undistort)
+camera_matrix: null
+dist_coeffs: null
+image_size: null  # [width, height] at calib time
