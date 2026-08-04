@@ -102,6 +102,21 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Never open local OpenCV preview window",
     )
+    hands.add_argument(
+        "--track-size",
+        default="640x360",
+        help="MediaPipe inference size WxH (default 640x360; use full for camera native)",
+    )
+    hands.add_argument(
+        "--capture",
+        default=None,
+        help="Optional camera capture WxH override (e.g. 1280x720) for more FPS",
+    )
+    hands.add_argument(
+        "--hud-size",
+        default="1280x720",
+        help="Projector HUD / video-sink size WxH (default 1280x720; use full for projector native)",
+    )
 
     sub.add_parser("projector-list", help="List Wayland outputs (wlr-randr)")
 
@@ -237,6 +252,22 @@ def cmd_calibrate_camera(args: argparse.Namespace) -> int:
     return 0
 
 
+def _parse_size(text: str | None, *, allow_full: bool = True) -> tuple[int, int] | None:
+    """Parse '1920x1080' or 'full' / '0x0' → None (native)."""
+    if text is None:
+        return None
+    s = str(text).strip().lower()
+    if allow_full and s in ("full", "native", "0", "0x0"):
+        return None
+    if "x" not in s:
+        raise ValueError(f"size must look like 640x360, got {text!r}")
+    a, b = s.split("x", 1)
+    w, h = int(a), int(b)
+    if w <= 0 or h <= 0:
+        return None
+    return w, h
+
+
 def cmd_hands(args: argparse.Namespace) -> int:
     import cv2
     import numpy as np
@@ -254,6 +285,15 @@ def cmd_hands(args: argparse.Namespace) -> int:
     cfg = _load_or_bootstrap_camera_config(args.camera_config)
     if args.device is not None:
         cfg.device_indices = [args.device] + [i for i in cfg.device_indices if i != args.device]
+    try:
+        capture = _parse_size(args.capture, allow_full=True) if args.capture else None
+        track_size = _parse_size(args.track_size, allow_full=True)
+        hud_size = _parse_size(args.hud_size, allow_full=True)
+    except ValueError as exc:
+        print(exc)
+        return 1
+    if capture is not None:
+        cfg.width, cfg.height = capture
 
     und = Undistorter(cfg)
     if args.no_undistort:
@@ -271,6 +311,7 @@ def cmd_hands(args: argparse.Namespace) -> int:
     surface: ProjectorSurface | None = None
     mpv: MpvFrameSink | None = None
     proj_w = proj_h = 0
+    hud_w = hud_h = 0
     show = "mpv"
     if project:
         proj_cfg = _load_or_bootstrap_projector_config(args.projector_config)
@@ -282,14 +323,18 @@ def cmd_hands(args: argparse.Namespace) -> int:
         surface = ProjectorSurface(proj_cfg)
         info = surface.prepare()
         proj_w, proj_h = int(proj_cfg.width), int(proj_cfg.height)
+        if hud_size is None:
+            hud_w, hud_h = proj_w, proj_h
+        else:
+            hud_w, hud_h = hud_size
         print(
             f"Projector: {info.name} {info.width}x{info.height}@{info.refresh_hz:.3f}Hz "
-            f"canvas={proj_w}x{proj_h} source={info.source}"
+            f"hud={hud_w}x{hud_h} source={info.source}"
         )
         show = args.show if args.show != "auto" else "mpv"
 
     cam = Camera(cfg)
-    tracker = HandTracker()
+    tracker = HandTracker(infer_size=track_size)
     window = "prismdesk-hands"
     if want_preview:
         try:
@@ -303,8 +348,14 @@ def cmd_hands(args: argparse.Namespace) -> int:
 
     idx = cam.open()
     w, h, fps = cam.negotiated()
+    track_label = (
+        f"{tracker.infer_size[0]}x{tracker.infer_size[1]}"
+        if tracker.infer_size
+        else f"{w}x{h} (full)"
+    )
     print(
         f"Hands: camera index={idx} negotiated={w}x{h}@{fps:.1f} "
+        f"track={track_label} "
         f"undistort={'on' if und.enabled else 'off (calibrate-camera first)'} "
         f"project={'on' if project else 'off'} preview={'on' if want_preview else 'off'}"
     )
@@ -314,7 +365,7 @@ def cmd_hands(args: argparse.Namespace) -> int:
         sink_fps = float(fps) if fps and fps > 1 else float(cfg.fps or 30)
         if show == "mpv":
             try:
-                mpv = MpvFrameSink(proj_w, proj_h, fps=sink_fps)
+                mpv = MpvFrameSink(hud_w, hud_h, fps=sink_fps)
             except Exception as exc:  # noqa: BLE001
                 print(f"video sink failed: {exc}")
                 print(
@@ -353,17 +404,17 @@ def cmd_hands(args: argparse.Namespace) -> int:
             fps_live = frames / elapsed
 
             if project:
-                if hud is None or hud.shape[:2] != (proj_h, proj_w):
-                    hud = np.zeros((proj_h, proj_w, 3), dtype=np.uint8)
+                if hud is None or hud.shape[:2] != (hud_h, hud_w):
+                    hud = np.zeros((hud_h, hud_w, 3), dtype=np.uint8)
                 else:
                     hud[:] = 0
                 tracker.draw_hud(hud, hands, src_size=(frame.shape[1], frame.shape[0]))
                 cv2.putText(
                     hud,
-                    f"fps={fps_live:.1f}  hands={len(hands)}  stretch-map",
-                    (40, 48),
+                    f"fps={fps_live:.1f}  hands={len(hands)}  track={track_label}",
+                    (24, 40),
                     cv2.FONT_HERSHEY_SIMPLEX,
-                    1.0,
+                    0.8,
                     (255, 255, 0),
                     2,
                 )
@@ -376,7 +427,8 @@ def cmd_hands(args: argparse.Namespace) -> int:
                 view = tracker.draw(frame, hands)
                 cv2.putText(
                     view,
-                    f"idx={idx}  fps={fps_live:.1f}  hands={len(hands)}  q=quit",
+                    f"idx={idx}  fps={fps_live:.1f}  hands={len(hands)}  "
+                    f"track={track_label}  q=quit",
                     (12, 32),
                     cv2.FONT_HERSHEY_SIMPLEX,
                     0.7,

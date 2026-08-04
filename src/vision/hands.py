@@ -94,6 +94,7 @@ class HandTracker:
         min_detection_confidence: float = 0.6,
         min_tracking_confidence: float = 0.5,
         model_path: Optional[str | Path] = None,
+        infer_size: Optional[Tuple[int, int]] = (640, 360),
     ) -> None:
         model = ensure_hand_model(model_path)
         options = mp_vision.HandLandmarkerOptions(
@@ -107,9 +108,21 @@ class HandTracker:
         self._landmarker = mp_vision.HandLandmarker.create_from_options(options)
         self._ts_ms = 0
         self._t0 = time.monotonic()
+        # Downscale before inference on Pi; None / (0,0) = full frame.
+        if infer_size is None or infer_size[0] <= 0 or infer_size[1] <= 0:
+            self.infer_size: Optional[Tuple[int, int]] = None
+        else:
+            self.infer_size = (int(infer_size[0]), int(infer_size[1]))
 
     def process(self, frame_bgr: np.ndarray) -> List[HandResult]:
-        rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+        h, w = frame_bgr.shape[:2]
+        infer = frame_bgr
+        if self.infer_size is not None:
+            tw, th = self.infer_size
+            if w != tw or h != th:
+                infer = cv2.resize(frame_bgr, (tw, th), interpolation=cv2.INTER_AREA)
+
+        rgb = cv2.cvtColor(infer, cv2.COLOR_BGR2RGB)
         if not rgb.flags["C_CONTIGUOUS"]:
             rgb = np.ascontiguousarray(rgb)
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
@@ -121,11 +134,11 @@ class HandTracker:
         self._ts_ms = now_ms
 
         result = self._landmarker.detect_for_video(mp_image, now_ms)
-        h, w = frame_bgr.shape[:2]
         hands: List[HandResult] = []
         landmarks_list = result.hand_landmarks or []
         handedness_list = result.handedness or []
         for i, lm_list in enumerate(landmarks_list):
+            # Normalized coords are FOV-relative; map px back to the source frame.
             norms = [(float(lm.x), float(lm.y)) for lm in lm_list]
             pts = [(x * w, y * h) for x, y in norms]
             label = "Unknown"
