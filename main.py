@@ -25,6 +25,8 @@ DEFAULT_CAMERA_CONFIG = ROOT / "config" / "camera.yaml"
 EXAMPLE_CAMERA_CONFIG = ROOT / "config" / "camera.example.yaml"
 DEFAULT_PROJECTOR_CONFIG = ROOT / "config" / "projector.yaml"
 EXAMPLE_PROJECTOR_CONFIG = ROOT / "config" / "projector.example.yaml"
+DEFAULT_HOME_HUB_CONFIG = ROOT / "config" / "home_hub.yaml"
+EXAMPLE_HOME_HUB_CONFIG = ROOT / "config" / "home_hub.example.yaml"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -203,6 +205,22 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=20.0,
         help="Live warp resolution for object measure (default 20; photo uses mat.yaml)",
+    )
+    desk.add_argument(
+        "--home-hub",
+        action="store_true",
+        help="Publish annotated camera JPEG + state to home-hub PrismDesk debug UI",
+    )
+    desk.add_argument(
+        "--home-hub-config",
+        type=Path,
+        default=DEFAULT_HOME_HUB_CONFIG,
+        help="Home-hub bridge YAML (default: config/home_hub.yaml)",
+    )
+    desk.add_argument(
+        "--home-hub-url",
+        default=None,
+        help="Override home-hub base URL (e.g. http://127.0.0.1:3000)",
     )
 
     sub.add_parser("projector-list", help="List Wayland outputs (wlr-randr)")
@@ -560,11 +578,12 @@ def cmd_desk(args: argparse.Namespace) -> int:
     import numpy as np
     from dataclasses import replace
 
+    from src.core.home_hub import HomeHubPublisher, load_home_hub_config
     from src.measure.mat import detect_mat_corners, load_mat_config
     from src.measure.object import analyze_object
     from src.measure.perspective import warp_to_mat_plane
     from src.vision.camera import Camera
-    from src.vision.desk import draw_desk_hud, format_object_metrics
+    from src.vision.desk import draw_debug_camera, draw_desk_hud, format_object_metrics
     from src.vision.hands import HandTracker
     from src.vision.projector import (
         MpvFrameSink,
@@ -585,6 +604,17 @@ def cmd_desk(args: argparse.Namespace) -> int:
             measure_config,
             object_border_margin_px=max(4, int(round(mat_config.object_border_margin_px * scale))),
         )
+
+    hub_cfg = load_home_hub_config(args.home_hub_config)
+    if not args.home_hub_config.is_file() and EXAMPLE_HOME_HUB_CONFIG.is_file():
+        # Keep defaults; only print once if user asked for hub.
+        pass
+    if args.home_hub:
+        hub_cfg.enabled = True
+    if args.home_hub_url:
+        hub_cfg.enabled = True
+        hub_cfg.base_url = str(args.home_hub_url).rstrip("/")
+    hub = HomeHubPublisher(hub_cfg) if hub_cfg.enabled else None
 
     cfg = _load_or_bootstrap_camera_config(args.camera_config)
     if args.device is not None:
@@ -643,6 +673,12 @@ def cmd_desk(args: argparse.Namespace) -> int:
         f"mat={mat_config.width_cm:.0f}x{mat_config.height_cm:.0f}cm "
         f"undistort={'on' if und.enabled else 'off'}"
     )
+    if hub is not None:
+        print(
+            f"home-hub: {hub_cfg.base_url} publish_every={hub_cfg.publish_every} "
+            f"config_every={hub_cfg.config_every}"
+        )
+        hub.fetch_config()
 
     show = args.show if args.show != "auto" else "mpv"
     mpv: MpvFrameSink | None = None
@@ -706,6 +742,8 @@ def cmd_desk(args: argparse.Namespace) -> int:
             elapsed = max(time.time() - t0, 1e-6)
             fps_live = frames / elapsed
             track_fps = track_frames / elapsed
+
+            overlays = hub.overlays if hub is not None else None
             draw_desk_hud(
                 hud,
                 hands=hands,
@@ -717,6 +755,7 @@ def cmd_desk(args: argparse.Namespace) -> int:
                 mat_ok=mat_corners is not None,
                 analysis=analysis if do_object else None,
                 measure_config=measure_config,
+                overlays=overlays,
             )
             if mpv is not None:
                 mpv.show(hud)
@@ -727,6 +766,38 @@ def cmd_desk(args: argparse.Namespace) -> int:
                 surface.show(hud)
                 if cv2.waitKey(1) & 0xFF == ord("q"):
                     break
+
+            if hub is not None:
+                if (frames - 1) % hub_cfg.config_every == 0:
+                    hub.fetch_config()
+                    overlays = hub.overlays
+                if (frames - 1) % hub_cfg.publish_every == 0:
+                    debug = draw_debug_camera(
+                        frame,
+                        hands=hands,
+                        mat_corners=mat_corners,
+                        mat_config=mat_config,
+                        fps_live=fps_live,
+                        track_fps=track_fps,
+                        mat_ok=mat_corners is not None,
+                        analysis=analysis if do_object else None,
+                        measure_config=measure_config,
+                        overlays=overlays,
+                    )
+                    state = {
+                        "fps": round(fps_live, 2),
+                        "track_fps": round(track_fps, 2),
+                        "mat_locked": mat_corners is not None,
+                        "hands": len(hands),
+                        "object": (
+                            format_object_metrics(analysis)
+                            if analysis is not None
+                            else None
+                        ),
+                        "capture": f"{frame.shape[1]}x{frame.shape[0]}",
+                        "overlays": hub.overlays.as_list(),
+                    }
+                    hub.publish(debug, state)
     except KeyboardInterrupt:
         print("\nInterrupted")
     finally:

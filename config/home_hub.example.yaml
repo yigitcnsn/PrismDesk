@@ -1,0 +1,20 @@
+# Home Hub PrismDesk debug bridge.
+# Copy to config/home_hub.yaml (gitignored) and set enabled: true.
+#
+# Hub module endpoints (default port — change to match your home-hub):
+#   POST /api/prismdesk/frame
+#   POST /api/prismdesk/state
+#   GET  /api/prismdesk/config
+
+enabled: false
+base_url: http://127.0.0.1:3000
+
+# Publish annotated camera JPEG every N desk frames
+publish_every: 3
+# Poll overlay toggles from hub every N desk frames
+config_every: 30
+
+jpeg_quality: 75
+max_bytes: 819200
+max_dim: 960
+timeout_sec: 1.5

@@ -14,6 +14,7 @@ Spatial AR workbench for Raspberry Pi 5: overhead camera + HY300 projector turn 
 | Camera calib | `python main.py calibrate-camera` | Chessboard → `config/camera.yaml` |
 | Hands | `python main.py hands [--project]` | MediaPipe Tasks HandLandmarker → optional HUD |
 | Desk (all-in-one) | `python main.py desk` | Mat + object measure + hands → projector HUD |
+| Desk → home-hub | `python main.py desk --home-hub` | Annotated camera JPEG + state to hub debug UI |
 | Projector list | `python main.py projector-list` | DRM / wlr-randr / xrandr discovery |
 | Projector test | `python main.py projector-test` | Fullscreen alignment pattern |
 
@@ -132,6 +133,11 @@ python main.py desk
 # defaults: capture 960x540, track 480x270, hud 640x360, object measure on
 # python main.py desk --no-object
 # python main.py desk --object-every 20
+
+# Publish debug camera+overlays to home-hub PrismDesk page
+cp config/home_hub.example.yaml config/home_hub.yaml   # set enabled/base_url
+python main.py desk --home-hub
+# or: python main.py desk --home-hub-url http://127.0.0.1:3000
 ```
 
 HUD shows mat outline, object edges/Ø/L×W in cm, hand skeleton, and index tip in mat-cm when the mat is locked. Keep hands off the mat while measuring if the silhouette gets confused.
@@ -149,6 +155,7 @@ MediaPipe model downloads once to `models/hand_landmarker.task` on first run.
 - [x] USB camera capture + fisheye/pinhole calibration path
 - [x] MediaPipe Hands (Tasks API) + projector HUD via ffplay/mpv
 - [x] Live `desk` mode: mat + object measure + hands
+- [x] home-hub PrismDesk debug publisher (`--home-hub`)
 
 ### Next
 
