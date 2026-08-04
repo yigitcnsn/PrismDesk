@@ -82,6 +82,18 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Override output name (default from config: HDMI-A-1)",
     )
+    proj.add_argument(
+        "--save",
+        type=Path,
+        default=None,
+        help="Write pattern PNG (no GUI required)",
+    )
+    proj.add_argument(
+        "--show",
+        choices=("opencv", "mpv", "feh", "auto"),
+        default="auto",
+        help="How to display: auto tries mpv then OpenCV (default: auto)",
+    )
     return parser
 
 
@@ -263,18 +275,23 @@ def _load_or_bootstrap_projector_config(path: Path):
 
 
 def cmd_projector_list(_args: argparse.Namespace) -> int:
-    from src.vision.projector import discovery_backend, list_outputs
+    from src.vision.projector import (
+        active_discovery_source,
+        discovery_backend,
+        ensure_gui_env,
+        list_outputs,
+    )
 
-    backend = discovery_backend()
-    print(f"discovery backend: {backend}")
-    if backend == "none":
-        print(
-            "No wlr-randr / xrandr / DRM. "
-            "On Wayland: sudo apt install wlr-randr. "
-            "On X11: sudo apt install x11-xserver-utils. "
-            "projector-test can still fullscreen-fallback if HY300 is the active display."
-        )
-        return 1
+    env = ensure_gui_env()
+    print(f"discovery binaries: {discovery_backend()}")
+    print(f"active source: {active_discovery_source()}")
+    print(
+        f"session DISPLAY={env.get('DISPLAY')!r} "
+        f"WAYLAND_DISPLAY={env.get('WAYLAND_DISPLAY')!r} "
+        f"XDG_RUNTIME_DIR={env.get('XDG_RUNTIME_DIR')!r}"
+    )
+    if env.get("fixed"):
+        print("auto-set:", ", ".join(env["fixed"]))
     outputs = list_outputs()
     if not outputs:
         print("No connected outputs found.")
@@ -300,29 +317,71 @@ def cmd_projector_list(_args: argparse.Namespace) -> int:
 def cmd_projector_test(args: argparse.Namespace) -> int:
     import cv2
 
-    from src.vision.projector import ProjectorSurface, make_alignment_pattern
+    from src.vision.projector import (
+        ProjectorSurface,
+        ensure_gui_env,
+        make_alignment_pattern,
+        opencv_gui_hint,
+        show_image_external,
+    )
 
     cfg = _load_or_bootstrap_projector_config(args.projector_config)
     if args.output:
         cfg.output_name = args.output
 
+    env = ensure_gui_env()
+    if env.get("fixed"):
+        print("auto-set:", ", ".join(env["fixed"]))
+    print(
+        f"session DISPLAY={env.get('DISPLAY')!r} "
+        f"WAYLAND_DISPLAY={env.get('WAYLAND_DISPLAY')!r}"
+    )
+
     surface = ProjectorSurface(cfg)
+    info = surface.prepare()
+    print(
+        f"Projector: {info.name} {info.width}x{info.height}@{info.refresh_hz:.3f}Hz "
+        f"pos=({info.x},{info.y}) source={info.source}"
+    )
+    pattern = make_alignment_pattern(cfg.width, cfg.height)
+
+    save_path = Path(args.save) if args.save else Path("/tmp/prismdesk-projector-test.png")
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    cv2.imwrite(str(save_path), pattern)
+    print(f"Wrote pattern: {save_path}")
+
+    if args.show in ("mpv", "feh", "auto"):
+        try:
+            tool = "auto" if args.show == "auto" else args.show
+            return int(show_image_external(save_path, tool=tool))
+        except Exception as exc:  # noqa: BLE001
+            print(f"external show failed: {exc}")
+            if args.show != "auto":
+                print(opencv_gui_hint())
+                return 1
+            print("falling back to OpenCV window…")
+
     try:
-        info = surface.prepare()
-        print(
-            f"Projector: {info.name} {info.width}x{info.height}@{info.refresh_hz:.3f}Hz "
-            f"pos=({info.x},{info.y})"
-        )
-        pattern = make_alignment_pattern(cfg.width, cfg.height)
         surface.open()
-        print("Showing alignment pattern on projector — press q in the window to quit")
+        print("Showing alignment pattern — press q to quit")
         while True:
             surface.show(pattern)
             if cv2.waitKey(50) & 0xFF == ord("q"):
                 break
+    except cv2.error as exc:
+        print(opencv_gui_hint())
+        print(f"cv2 error: {exc}")
+        return 1
+    except Exception as exc:  # noqa: BLE001
+        print(opencv_gui_hint())
+        print(f"error: {exc}")
+        return 1
     finally:
         surface.close()
-        cv2.destroyAllWindows()
+        try:
+            cv2.destroyAllWindows()
+        except Exception:
+            pass
     return 0
 
 

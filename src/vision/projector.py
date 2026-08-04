@@ -93,6 +93,7 @@ def xrandr_available() -> bool:
 
 
 def discovery_backend() -> str:
+    """What tool binaries exist (not necessarily usable without a session)."""
     if wlr_randr_available():
         return "wlr-randr"
     if xrandr_available():
@@ -100,6 +101,14 @@ def discovery_backend() -> str:
     if Path("/sys/class/drm").is_dir():
         return "drm"
     return "none"
+
+
+def active_discovery_source() -> str:
+    """What list_outputs() actually used."""
+    outs = list_outputs()
+    if not outs:
+        return discovery_backend()
+    return outs[0].source or discovery_backend()
 
 
 def list_outputs() -> List[OutputInfo]:
@@ -491,3 +500,112 @@ def make_alignment_pattern(width: int, height: int) -> np.ndarray:
         2,
     )
     return img
+
+
+def ensure_gui_env() -> dict:
+    """
+    Best-effort: set XDG_RUNTIME_DIR / WAYLAND_DISPLAY / DISPLAY for local Pi session.
+
+    Returns a small status dict for logging. Does not guarantee OpenCV can open a window
+    (pip opencv-python ships Qt/xcb only — often broken on pure Wayland).
+    """
+    status = {
+        "uid": os.getuid(),
+        "DISPLAY": os.environ.get("DISPLAY"),
+        "WAYLAND_DISPLAY": os.environ.get("WAYLAND_DISPLAY"),
+        "XDG_RUNTIME_DIR": os.environ.get("XDG_RUNTIME_DIR"),
+        "fixed": [],
+    }
+    uid = status["uid"]
+    runtime = Path(f"/run/user/{uid}")
+    if not os.environ.get("XDG_RUNTIME_DIR") and runtime.is_dir():
+        os.environ["XDG_RUNTIME_DIR"] = str(runtime)
+        status["fixed"].append(f"XDG_RUNTIME_DIR={runtime}")
+        status["XDG_RUNTIME_DIR"] = str(runtime)
+
+    runtime_dir = Path(os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{uid}"))
+    if not os.environ.get("WAYLAND_DISPLAY"):
+        for candidate in ("wayland-0", "wayland-1"):
+            if (runtime_dir / candidate).exists():
+                os.environ["WAYLAND_DISPLAY"] = candidate
+                status["fixed"].append(f"WAYLAND_DISPLAY={candidate}")
+                status["WAYLAND_DISPLAY"] = candidate
+                break
+
+    if not os.environ.get("DISPLAY"):
+        # Xwayland / X11 local seat
+        if Path("/tmp/.X11-unix/X0").exists():
+            os.environ["DISPLAY"] = ":0"
+            status["fixed"].append("DISPLAY=:0")
+            status["DISPLAY"] = ":0"
+
+    return status
+
+
+def gui_session_present() -> bool:
+    ensure_gui_env()
+    if os.environ.get("WAYLAND_DISPLAY") or os.environ.get("DISPLAY"):
+        return True
+    return False
+
+
+def opencv_gui_hint() -> str:
+    return (
+        "OpenCV window failed (no usable display / Qt xcb).\n"
+        "Fixes on Pi 5:\n"
+        "  1) Run from the desktop session (not plain SSH), or:\n"
+        "       export XDG_RUNTIME_DIR=/run/user/$(id -u)\n"
+        "       export WAYLAND_DISPLAY=wayland-0   # or DISPLAY=:0 if X11/Xwayland\n"
+        "  2) Prefer system OpenCV (GTK) over pip Qt build:\n"
+        "       pip uninstall -y opencv-python opencv-python-headless\n"
+        "       sudo apt install -y python3-opencv\n"
+        "  3) Or skip GUI: python main.py projector-test --save /tmp/proj.png --show mpv"
+    )
+
+
+def show_image_external(path: str | Path, tool: str = "mpv") -> int:
+    """
+    Fullscreen show via external player (works better than OpenCV Qt on Pi HDMI).
+
+    tool: mpv | feh | auto
+    """
+    path = Path(path)
+    if not path.is_file():
+        raise FileNotFoundError(path)
+    ensure_gui_env()
+
+    def run(cmd: list[str]) -> int:
+        print("exec:", " ".join(cmd))
+        return subprocess.run(cmd, check=False).returncode
+
+    tools = []
+    if tool == "auto":
+        tools = ["mpv", "feh"]
+    else:
+        tools = [tool]
+
+    errors = []
+    for name in tools:
+        if not shutil.which(name):
+            errors.append(f"{name} not installed")
+            continue
+        if name == "mpv":
+            # DRM/Wayland/X — mpv picks a working VO when session env is set
+            code = run(
+                [
+                    "mpv",
+                    "--fs",
+                    "--image-display-duration=inf",
+                    "--loop-file=inf",
+                    str(path),
+                ]
+            )
+            return code
+        if name == "feh":
+            code = run(["feh", "--fullscreen", "--auto-zoom", str(path)])
+            return code
+    raise RuntimeError(
+        "No external viewer worked ("
+        + "; ".join(errors)
+        + "). Install with: sudo apt install mpv"
+    )
