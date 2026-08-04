@@ -120,8 +120,8 @@ def build_parser() -> argparse.ArgumentParser:
     hands.add_argument(
         "--track-every",
         type=int,
-        default=2,
-        help="Run MediaPipe every Nth frame; reuse last hands otherwise (default 2)",
+        default=1,
+        help="Run MediaPipe every Nth frame; reuse last hands otherwise (default 1 = every frame)",
     )
 
     sub.add_parser("projector-list", help="List Wayland outputs (wlr-randr)")
