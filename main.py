@@ -5,6 +5,7 @@ Modes:
   measure           Photo edge measurement (existing)
   calibrate-camera  Chessboard fisheye/pinhole calibration for USB cam
   hands             Live hand tracking (optional --project HUD on HY300)
+  desk              Mat find + hands + projector HUD (all-in-one live)
   projector-list    List Wayland outputs via wlr-randr
   projector-test    Fullscreen alignment pattern on HY300 (HDMI-A-1)
 """
@@ -122,6 +123,69 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=1,
         help="Run MediaPipe every Nth frame; reuse last hands otherwise (default 1 = every frame)",
+    )
+
+    desk = sub.add_parser(
+        "desk",
+        help="Live mat detection + hand tracking + projector HUD",
+    )
+    desk.add_argument(
+        "--camera-config",
+        type=Path,
+        default=DEFAULT_CAMERA_CONFIG,
+        help="Camera YAML with optional calibration",
+    )
+    desk.add_argument(
+        "--mat-config",
+        type=Path,
+        default=ROOT / "config" / "mat.yaml",
+        help="Mat YAML (default: config/mat.yaml)",
+    )
+    desk.add_argument(
+        "--projector-config",
+        type=Path,
+        default=DEFAULT_PROJECTOR_CONFIG,
+        help="Projector YAML (default: config/projector.yaml)",
+    )
+    desk.add_argument("--device", type=int, default=None, help="Force V4L2 index")
+    desk.add_argument("--no-undistort", action="store_true")
+    desk.add_argument(
+        "--output",
+        default=None,
+        help="Override projector output name (e.g. HDMI-A-1)",
+    )
+    desk.add_argument(
+        "--show",
+        choices=("auto", "mpv", "opencv"),
+        default="auto",
+        help="Projector sink (default: auto → ffplay/mpv)",
+    )
+    desk.add_argument(
+        "--track-size",
+        default="480x270",
+        help="MediaPipe inference size WxH (default 480x270)",
+    )
+    desk.add_argument(
+        "--capture",
+        default="960x540",
+        help="Camera capture WxH (default 960x540)",
+    )
+    desk.add_argument(
+        "--hud-size",
+        default="640x360",
+        help="Projector HUD size WxH (default 640x360)",
+    )
+    desk.add_argument(
+        "--track-every",
+        type=int,
+        default=1,
+        help="Run MediaPipe every Nth frame (default 1)",
+    )
+    desk.add_argument(
+        "--mat-every",
+        type=int,
+        default=12,
+        help="Run mat detection every Nth frame (default 12)",
     )
 
     sub.add_parser("projector-list", help="List Wayland outputs (wlr-randr)")
@@ -473,6 +537,158 @@ def cmd_hands(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_desk(args: argparse.Namespace) -> int:
+    """All-in-one live: mat find + hands + projector HUD."""
+    import cv2
+    import numpy as np
+
+    from src.measure.mat import detect_mat_corners, load_mat_config
+    from src.vision.camera import Camera
+    from src.vision.desk import draw_desk_hud
+    from src.vision.hands import HandTracker
+    from src.vision.projector import (
+        MpvFrameSink,
+        ProjectorSurface,
+        ensure_gui_env,
+        opencv_gui_hint,
+    )
+    from src.vision.undistort import Undistorter
+
+    mat_config = load_mat_config(args.mat_config)
+    cfg = _load_or_bootstrap_camera_config(args.camera_config)
+    if args.device is not None:
+        cfg.device_indices = [args.device] + [i for i in cfg.device_indices if i != args.device]
+    try:
+        capture = _parse_size(args.capture, allow_full=True)
+        track_size = _parse_size(args.track_size, allow_full=True)
+        hud_size = _parse_size(args.hud_size, allow_full=True)
+    except ValueError as exc:
+        print(exc)
+        return 1
+    if capture is not None:
+        cfg.width, cfg.height = capture
+
+    und = Undistorter(cfg)
+    if args.no_undistort:
+        from src.vision.camera import CameraConfig as CC
+
+        und = Undistorter(CC())
+
+    proj_cfg = _load_or_bootstrap_projector_config(args.projector_config)
+    if args.output:
+        proj_cfg.output_name = args.output
+    env = ensure_gui_env()
+    if env.get("fixed"):
+        print("auto-set:", ", ".join(env["fixed"]))
+    surface = ProjectorSurface(proj_cfg)
+    info = surface.prepare()
+    proj_w, proj_h = int(proj_cfg.width), int(proj_cfg.height)
+    if hud_size is None:
+        hud_w, hud_h = proj_w, proj_h
+    else:
+        hud_w, hud_h = hud_size
+    print(
+        f"Projector: {info.name} {info.width}x{info.height}@{info.refresh_hz:.3f}Hz "
+        f"hud={hud_w}x{hud_h} source={info.source}"
+    )
+
+    cam = Camera(cfg)
+    tracker = HandTracker(infer_size=track_size)
+    idx = cam.open()
+    w, h, fps = cam.negotiated()
+    track_every = max(1, int(args.track_every))
+    mat_every = max(1, int(args.mat_every))
+    track_label = (
+        f"{tracker.infer_size[0]}x{tracker.infer_size[1]}"
+        if tracker.infer_size
+        else f"{w}x{h}"
+    )
+    print(
+        f"Desk: camera={idx} {w}x{h}@{fps:.1f} track={track_label} "
+        f"every={track_every} mat_every={mat_every} "
+        f"mat={mat_config.width_cm:.0f}x{mat_config.height_cm:.0f}cm "
+        f"undistort={'on' if und.enabled else 'off'}"
+    )
+
+    show = args.show if args.show != "auto" else "mpv"
+    mpv: MpvFrameSink | None = None
+    sink_fps = float(fps) if fps and fps > 1 else float(cfg.fps or 30)
+    if show == "mpv":
+        try:
+            mpv = MpvFrameSink(hud_w, hud_h, fps=sink_fps)
+        except Exception as exc:  # noqa: BLE001
+            print(f"video sink failed: {exc}")
+            print(opencv_gui_hint())
+            tracker.close()
+            cam.close()
+            return 1
+    elif show == "opencv":
+        try:
+            surface.open()
+        except Exception as exc:  # noqa: BLE001
+            print(opencv_gui_hint())
+            print(f"error: {exc}")
+            tracker.close()
+            cam.close()
+            return 1
+    print("Desk HUD on projector — Ctrl+C quit")
+
+    frames = 0
+    track_frames = 0
+    t0 = time.time()
+    hud = np.zeros((hud_h, hud_w, 3), dtype=np.uint8)
+    hands = []
+    mat_corners = None
+    try:
+        while True:
+            frame = cam.read()
+            if und.enabled and not args.no_undistort:
+                frame = und.apply(frame)
+            frames += 1
+            if (frames - 1) % track_every == 0:
+                hands = tracker.process(frame)
+                track_frames += 1
+            if (frames - 1) % mat_every == 0:
+                found = detect_mat_corners(frame, mat_config)
+                if found is not None:
+                    mat_corners = found
+            elapsed = max(time.time() - t0, 1e-6)
+            fps_live = frames / elapsed
+            track_fps = track_frames / elapsed
+            draw_desk_hud(
+                hud,
+                hands=hands,
+                mat_corners=mat_corners,
+                mat_config=mat_config,
+                src_size=(frame.shape[1], frame.shape[0]),
+                fps_live=fps_live,
+                track_fps=track_fps,
+                mat_ok=mat_corners is not None,
+            )
+            if mpv is not None:
+                mpv.show(hud)
+                if not mpv.alive:
+                    print("video sink closed — exiting")
+                    break
+            else:
+                surface.show(hud)
+                if cv2.waitKey(1) & 0xFF == ord("q"):
+                    break
+    except KeyboardInterrupt:
+        print("\nInterrupted")
+    finally:
+        tracker.close()
+        cam.close()
+        if mpv is not None:
+            mpv.close()
+        surface.close()
+        try:
+            cv2.destroyAllWindows()
+        except Exception:
+            pass
+    return 0
+
+
 def _load_or_bootstrap_projector_config(path: Path):
     from src.vision.projector import ProjectorConfig, load_projector_config
 
@@ -602,6 +818,7 @@ def main() -> int:
             "measure",
             "calibrate-camera",
             "hands",
+            "desk",
             "projector-list",
             "projector-test",
         }
@@ -616,6 +833,8 @@ def main() -> int:
         return cmd_calibrate_camera(args)
     if args.command == "hands":
         return cmd_hands(args)
+    if args.command == "desk":
+        return cmd_desk(args)
     if args.command == "projector-list":
         return cmd_projector_list(args)
     if args.command == "projector-test":
