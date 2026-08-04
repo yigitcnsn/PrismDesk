@@ -14,16 +14,6 @@ from typing import List, Optional, Tuple
 import cv2
 import numpy as np
 
-try:
-    import mediapipe as mp
-    from mediapipe.tasks import python as mp_tasks
-    from mediapipe.tasks.python import vision as mp_vision
-except ImportError as exc:  # pragma: no cover
-    raise ImportError(
-        "mediapipe is required for hand tracking. Install with: pip install mediapipe"
-    ) from exc
-
-
 Point = Tuple[float, float]
 
 # Classic 21-point hand skeleton (MediaPipe Hands).
@@ -87,6 +77,18 @@ def ensure_hand_model(path: Optional[str | Path] = None) -> Path:
     return dest
 
 
+def _import_mediapipe():
+    try:
+        import mediapipe as mp
+        from mediapipe.tasks import python as mp_tasks
+        from mediapipe.tasks.python import vision as mp_vision
+    except ImportError as exc:  # pragma: no cover
+        raise ImportError(
+            "mediapipe is required for hand tracking. Install with: pip install mediapipe"
+        ) from exc
+    return mp, mp_tasks, mp_vision
+
+
 class HandTracker:
     def __init__(
         self,
@@ -96,6 +98,8 @@ class HandTracker:
         model_path: Optional[str | Path] = None,
         infer_size: Optional[Tuple[int, int]] = (640, 360),
     ) -> None:
+        mp, mp_tasks, mp_vision = _import_mediapipe()
+        self._mp = mp
         model = ensure_hand_model(model_path)
         options = mp_vision.HandLandmarkerOptions(
             base_options=mp_tasks.BaseOptions(model_asset_path=str(model)),
@@ -125,7 +129,7 @@ class HandTracker:
         rgb = cv2.cvtColor(infer, cv2.COLOR_BGR2RGB)
         if not rgb.flags["C_CONTIGUOUS"]:
             rgb = np.ascontiguousarray(rgb)
-        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+        mp_image = self._mp.Image(image_format=self._mp.ImageFormat.SRGB, data=rgb)
 
         # Timestamps must be monotonically increasing (ms).
         now_ms = int((time.monotonic() - self._t0) * 1000.0)

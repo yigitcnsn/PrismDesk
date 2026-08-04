@@ -75,6 +75,23 @@ def image_points_to_mat_cm(
     return [(float(x) / ppc, float(y) / ppc) for x, y in mapped]
 
 
+def mat_plane_points_to_image(
+    points: Sequence[Point],
+    corners: np.ndarray,
+    config: MatConfig,
+) -> List[Point]:
+    """Map mat-plane pixel points back into the camera image."""
+    if not points:
+        return []
+    H, _, _, _ = mat_homography(corners, config)
+    ok, H_inv = cv2.invert(H)
+    if not ok:
+        raise RuntimeError("Failed to invert mat homography")
+    pts = np.asarray(points, dtype=np.float32).reshape(-1, 1, 2)
+    mapped = cv2.perspectiveTransform(pts, H_inv).reshape(-1, 2)
+    return [(float(x), float(y)) for x, y in mapped]
+
+
 def warp_to_mat_plane(
     image: np.ndarray,
     corners: np.ndarray,

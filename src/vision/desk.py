@@ -1,4 +1,4 @@
-"""Live desk HUD: mat outline + hands on the projector canvas."""
+"""Live desk HUD: mat outline + object measure + hands on the projector canvas."""
 
 from __future__ import annotations
 
@@ -8,10 +8,36 @@ import cv2
 import numpy as np
 
 from src.measure.mat import MatConfig, order_corners
-from src.measure.perspective import image_points_to_mat_cm
+from src.measure.perspective import image_points_to_mat_cm, mat_plane_points_to_image
+from src.measure.shape import ObjectAnalysis
 from src.vision.hands import HAND_CONNECTIONS, HandResult
 
 Point = Tuple[float, float]
+
+
+def format_object_metrics(analysis: ObjectAnalysis) -> str:
+    """Short one-line measurement string for the HUD / CLI."""
+    if analysis.shape == "circle":
+        parts = []
+        if analysis.diameter_cm is not None:
+            parts.append(f"Ø{analysis.diameter_cm:.1f}")
+        if analysis.radius_cm is not None:
+            parts.append(f"r{analysis.radius_cm:.1f}")
+        body = " ".join(parts) if parts else "circle"
+    elif analysis.shape == "thin":
+        if analysis.length_cm is not None and analysis.width_cm is not None:
+            body = f"{analysis.length_cm:.1f}x{analysis.width_cm:.1f}"
+        else:
+            body = "thin"
+    else:
+        if analysis.edge_cm:
+            body = " ".join(f"{e:.1f}" for e in analysis.edge_cm)
+        else:
+            body = "polygon"
+    colors = ",".join(analysis.colors[:2]) if analysis.colors else ""
+    if colors:
+        return f"{analysis.shape} {body}cm [{colors}]"
+    return f"{analysis.shape} {body}cm"
 
 
 def _to_hud(
@@ -37,11 +63,14 @@ def draw_desk_hud(
     fps_live: float,
     track_fps: float,
     mat_ok: bool,
+    analysis: Optional[ObjectAnalysis] = None,
+    measure_config: Optional[MatConfig] = None,
 ) -> np.ndarray:
-    """Dark projector HUD: mat quad, hand skeleton, index tip in mat-cm when locked."""
+    """Dark projector HUD: mat, object outline+cm, hand skeleton."""
     hud_h, hud_w = canvas_bgr.shape[:2]
     src_w, src_h = src_size
     canvas_bgr[:] = 0
+    measure_cfg = measure_config or mat_config
 
     if mat_corners is not None:
         ordered = order_corners(mat_corners)
@@ -62,6 +91,56 @@ def draw_desk_hud(
             1,
             cv2.LINE_AA,
         )
+
+    if analysis is not None and mat_corners is not None and analysis.outline_points:
+        try:
+            cam_pts = mat_plane_points_to_image(
+                analysis.outline_points, mat_corners, measure_cfg
+            )
+            hud_obj = [
+                _to_hud(x, y, src_w, src_h, hud_w, hud_h) for x, y in cam_pts
+            ]
+            if len(hud_obj) >= 2:
+                for i in range(len(hud_obj)):
+                    cv2.line(
+                        canvas_bgr,
+                        hud_obj[i],
+                        hud_obj[(i + 1) % len(hud_obj)],
+                        (0, 165, 255),
+                        2,
+                        cv2.LINE_AA,
+                    )
+            label = format_object_metrics(analysis)
+            anchor = hud_obj[0] if hud_obj else (16, hud_h - 20)
+            cv2.putText(
+                canvas_bgr,
+                label,
+                (max(8, anchor[0]), min(hud_h - 12, anchor[1] + 22)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.55,
+                (0, 165, 255),
+                1,
+                cv2.LINE_AA,
+            )
+            # Edge labels for polygons
+            if analysis.shape == "polygon" and analysis.edge_cm and len(hud_obj) >= 2:
+                n = min(len(analysis.edge_cm), len(hud_obj))
+                for i in range(n):
+                    a = hud_obj[i]
+                    b = hud_obj[(i + 1) % len(hud_obj)]
+                    mid = ((a[0] + b[0]) // 2, (a[1] + b[1]) // 2)
+                    cv2.putText(
+                        canvas_bgr,
+                        f"{analysis.edge_cm[i]:.1f}",
+                        mid,
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.45,
+                        (0, 200, 255),
+                        1,
+                        cv2.LINE_AA,
+                    )
+        except Exception:
+            pass
 
     bone = (0, 255, 255)
     joint = (255, 0, 255)
@@ -99,12 +178,13 @@ def draw_desk_hud(
         )
 
     status = "mat:lock" if mat_ok else "mat:--"
+    obj = "obj:yes" if analysis is not None else "obj:--"
     cv2.putText(
         canvas_bgr,
-        f"fps={fps_live:.1f}  track={track_fps:.1f}Hz  hands={len(hands)}  {status}",
+        f"fps={fps_live:.1f}  track={track_fps:.1f}Hz  hands={len(hands)}  {status}  {obj}",
         (16, 28),
         cv2.FONT_HERSHEY_SIMPLEX,
-        0.65,
+        0.55,
         (255, 255, 0),
         2,
         cv2.LINE_AA,

@@ -5,7 +5,7 @@ Modes:
   measure           Photo edge measurement (existing)
   calibrate-camera  Chessboard fisheye/pinhole calibration for USB cam
   hands             Live hand tracking (optional --project HUD on HY300)
-  desk              Mat find + hands + projector HUD (all-in-one live)
+  desk              Mat find + object measure + hands + projector HUD
   projector-list    List Wayland outputs via wlr-randr
   projector-test    Fullscreen alignment pattern on HY300 (HDMI-A-1)
 """
@@ -186,6 +186,23 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=12,
         help="Run mat detection every Nth frame (default 12)",
+    )
+    desk.add_argument(
+        "--object-every",
+        type=int,
+        default=15,
+        help="Run object measure every Nth frame when mat locked (default 15)",
+    )
+    desk.add_argument(
+        "--no-object",
+        action="store_true",
+        help="Disable live object measurement",
+    )
+    desk.add_argument(
+        "--measure-px-per-cm",
+        type=float,
+        default=20.0,
+        help="Live warp resolution for object measure (default 20; photo uses mat.yaml)",
     )
 
     sub.add_parser("projector-list", help="List Wayland outputs (wlr-randr)")
@@ -538,13 +555,16 @@ def cmd_hands(args: argparse.Namespace) -> int:
 
 
 def cmd_desk(args: argparse.Namespace) -> int:
-    """All-in-one live: mat find + hands + projector HUD."""
+    """All-in-one live: mat find + object measure + hands + projector HUD."""
     import cv2
     import numpy as np
+    from dataclasses import replace
 
     from src.measure.mat import detect_mat_corners, load_mat_config
+    from src.measure.object import analyze_object
+    from src.measure.perspective import warp_to_mat_plane
     from src.vision.camera import Camera
-    from src.vision.desk import draw_desk_hud
+    from src.vision.desk import draw_desk_hud, format_object_metrics
     from src.vision.hands import HandTracker
     from src.vision.projector import (
         MpvFrameSink,
@@ -555,6 +575,17 @@ def cmd_desk(args: argparse.Namespace) -> int:
     from src.vision.undistort import Undistorter
 
     mat_config = load_mat_config(args.mat_config)
+    # Lighter warp for live FPS; outline maps back via same config's homography.
+    measure_ppc = max(5.0, float(args.measure_px_per_cm))
+    measure_config = replace(mat_config, px_per_cm=measure_ppc)
+    # Scale border margin roughly with px_per_cm so ~1cm stay similar.
+    if mat_config.px_per_cm > 0:
+        scale = measure_ppc / float(mat_config.px_per_cm)
+        measure_config = replace(
+            measure_config,
+            object_border_margin_px=max(4, int(round(mat_config.object_border_margin_px * scale))),
+        )
+
     cfg = _load_or_bootstrap_camera_config(args.camera_config)
     if args.device is not None:
         cfg.device_indices = [args.device] + [i for i in cfg.device_indices if i != args.device]
@@ -598,6 +629,8 @@ def cmd_desk(args: argparse.Namespace) -> int:
     w, h, fps = cam.negotiated()
     track_every = max(1, int(args.track_every))
     mat_every = max(1, int(args.mat_every))
+    object_every = max(1, int(args.object_every))
+    do_object = not bool(args.no_object)
     track_label = (
         f"{tracker.infer_size[0]}x{tracker.infer_size[1]}"
         if tracker.infer_size
@@ -605,7 +638,8 @@ def cmd_desk(args: argparse.Namespace) -> int:
     )
     print(
         f"Desk: camera={idx} {w}x{h}@{fps:.1f} track={track_label} "
-        f"every={track_every} mat_every={mat_every} "
+        f"every={track_every} mat_every={mat_every} object_every={object_every} "
+        f"measure_ppc={measure_ppc:.0f} object={'on' if do_object else 'off'} "
         f"mat={mat_config.width_cm:.0f}x{mat_config.height_cm:.0f}cm "
         f"undistort={'on' if und.enabled else 'off'}"
     )
@@ -639,6 +673,8 @@ def cmd_desk(args: argparse.Namespace) -> int:
     hud = np.zeros((hud_h, hud_w, 3), dtype=np.uint8)
     hands = []
     mat_corners = None
+    analysis = None
+    last_metrics = ""
     try:
         while True:
             frame = cam.read()
@@ -652,6 +688,21 @@ def cmd_desk(args: argparse.Namespace) -> int:
                 found = detect_mat_corners(frame, mat_config)
                 if found is not None:
                     mat_corners = found
+            if (
+                do_object
+                and mat_corners is not None
+                and (frames - 1) % object_every == 0
+            ):
+                try:
+                    warped, _ = warp_to_mat_plane(frame, mat_corners, measure_config)
+                    analysis = analyze_object(warped, measure_config)
+                    if analysis is not None:
+                        metrics = format_object_metrics(analysis)
+                        if metrics != last_metrics:
+                            print(metrics)
+                            last_metrics = metrics
+                except Exception as exc:  # noqa: BLE001
+                    print(f"object measure skipped: {exc}")
             elapsed = max(time.time() - t0, 1e-6)
             fps_live = frames / elapsed
             track_fps = track_frames / elapsed
@@ -664,6 +715,8 @@ def cmd_desk(args: argparse.Namespace) -> int:
                 fps_live=fps_live,
                 track_fps=track_fps,
                 mat_ok=mat_corners is not None,
+                analysis=analysis if do_object else None,
+                measure_config=measure_config,
             )
             if mpv is not None:
                 mpv.show(hud)
