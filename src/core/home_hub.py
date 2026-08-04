@@ -146,9 +146,12 @@ class HomeHubPublisher:
             method="POST",
             headers={"Content-Type": content_type, "Content-Length": str(len(body))},
         )
-        with urllib.request.urlopen(req, timeout=self.config.timeout_sec) as resp:
-            if resp.status >= 400:
-                raise RuntimeError(f"HTTP {resp.status} posting to {url}")
+        try:
+            with urllib.request.urlopen(req, timeout=self.config.timeout_sec) as resp:
+                if resp.status >= 400:
+                    raise RuntimeError(f"HTTP {resp.status} POST {url}")
+        except urllib.error.HTTPError as exc:
+            raise RuntimeError(f"HTTP {exc.code} POST {url}") from exc
 
     def _post_json(self, url: str, payload: Dict[str, Any]) -> None:
         data = json.dumps(payload).encode("utf-8")
@@ -158,15 +161,21 @@ class HomeHubPublisher:
             method="POST",
             headers={"Content-Type": "application/json", "Content-Length": str(len(data))},
         )
-        with urllib.request.urlopen(req, timeout=self.config.timeout_sec) as resp:
-            if resp.status >= 400:
-                raise RuntimeError(f"HTTP {resp.status} posting JSON to {url}")
+        try:
+            with urllib.request.urlopen(req, timeout=self.config.timeout_sec) as resp:
+                if resp.status >= 400:
+                    raise RuntimeError(f"HTTP {resp.status} POST {url}")
+        except urllib.error.HTTPError as exc:
+            raise RuntimeError(f"HTTP {exc.code} POST {url}") from exc
 
     def _request_json(self, method: str, url: str) -> Any:
         req = urllib.request.Request(url, method=method)
-        with urllib.request.urlopen(req, timeout=self.config.timeout_sec) as resp:
-            body = resp.read().decode("utf-8")
-            return json.loads(body) if body else {}
+        try:
+            with urllib.request.urlopen(req, timeout=self.config.timeout_sec) as resp:
+                body = resp.read().decode("utf-8")
+                return json.loads(body) if body else {}
+        except urllib.error.HTTPError as exc:
+            raise RuntimeError(f"HTTP {exc.code} {method} {url}") from exc
 
 
 def encode_jpeg_capped(
