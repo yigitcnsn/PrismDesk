@@ -263,22 +263,34 @@ def _load_or_bootstrap_projector_config(path: Path):
 
 
 def cmd_projector_list(_args: argparse.Namespace) -> int:
-    from src.vision.projector import list_outputs, wlr_randr_available
+    from src.vision.projector import discovery_backend, list_outputs
 
-    if not wlr_randr_available():
-        print("wlr-randr not found. Install it on Pi OS Wayland/labwc, or run under a Wayland session.")
+    backend = discovery_backend()
+    print(f"discovery backend: {backend}")
+    if backend == "none":
+        print(
+            "No wlr-randr / xrandr / DRM. "
+            "On Wayland: sudo apt install wlr-randr. "
+            "On X11: sudo apt install x11-xserver-utils. "
+            "projector-test can still fullscreen-fallback if HY300 is the active display."
+        )
         return 1
     outputs = list_outputs()
     if not outputs:
-        print("No outputs parsed from wlr-randr.")
+        print("No connected outputs found.")
         return 1
     for out in outputs:
         print(
             f"{out.name}: {out.width}x{out.height}@{out.refresh_hz:.3f}Hz "
-            f"pos=({out.x},{out.y}) enabled={out.enabled} make={out.make!r}"
+            f"pos=({out.x},{out.y}) enabled={out.enabled} "
+            f"source={out.source} make={out.make!r}"
         )
         for w, h, hz in out.modes[:8]:
-            mark = " *" if (w, h) == (out.width, out.height) and abs(hz - out.refresh_hz) < 0.01 else ""
+            mark = (
+                " *"
+                if (w, h) == (out.width, out.height) and (hz == 0 or abs(hz - out.refresh_hz) < 0.01)
+                else ""
+            )
             print(f"  mode {w}x{h}@{hz:.3f}Hz{mark}")
         if len(out.modes) > 8:
             print(f"  … {len(out.modes) - 8} more modes")

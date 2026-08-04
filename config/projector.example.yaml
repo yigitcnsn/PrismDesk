@@ -12,5 +12,7 @@ refresh_hz: 50
 # OpenCV window title used for the projection surface
 window_name: prismdesk-projector
 
-# If true, try `wlr-randr --output … --mode WxH@Hz` before opening the window
+# If true, try wlr-randr/xrandr mode switch before opening the window
 apply_mode: true
+# If discovery tools missing, still open fullscreen at (0,0)
+allow_fullscreen_fallback: true
