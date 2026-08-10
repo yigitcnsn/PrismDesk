@@ -10,6 +10,7 @@ Smoke-test lessons baked in:
 from __future__ import annotations
 
 import os
+import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -175,16 +176,22 @@ class Camera:
         )
 
     def _open_index(self, index: int) -> Optional[cv2.VideoCapture]:
-        # Integer index + CAP_V4L2 — do not pass '/dev/videoN' on arm64 OpenCV.
-        cap = cv2.VideoCapture(int(index), cv2.CAP_V4L2)
+        # Integer index — V4L2 on Linux/Pi; default backend elsewhere (macOS/Windows debug).
+        if sys.platform.startswith("linux"):
+            cap = cv2.VideoCapture(int(index), cv2.CAP_V4L2)
+        else:
+            cap = cv2.VideoCapture(int(index))
         if not cap.isOpened():
             cap.release()
             return None
-        fourcc = cv2.VideoWriter_fourcc(*self.config.fourcc[:4])
-        cap.set(cv2.CAP_PROP_FOURCC, fourcc)
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, float(self.config.width))
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, float(self.config.height))
-        cap.set(cv2.CAP_PROP_FPS, float(self.config.fps))
+        try:
+            fourcc = cv2.VideoWriter_fourcc(*self.config.fourcc[:4])
+            cap.set(cv2.CAP_PROP_FOURCC, fourcc)
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, float(self.config.width))
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, float(self.config.height))
+            cap.set(cv2.CAP_PROP_FPS, float(self.config.fps))
+        except Exception:
+            pass
         # Reduce internal buffering so we don't process stale/corrupt queues
         try:
             cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)

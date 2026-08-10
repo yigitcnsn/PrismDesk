@@ -6,6 +6,7 @@ Modes:
   calibrate-camera  Chessboard fisheye/pinhole calibration for USB cam
   hands             Live hand tracking (optional --project HUD on HY300)
   idle              Cheap projector HUD: top-left time only (no camera)
+  debug             Local GUI: camera or examples/ images, test idle/hands/desk
   desk              Mat find + object measure + hands + projector HUD
   projector-list    List Wayland outputs via wlr-randr
   projector-test    Fullscreen alignment pattern on HY300 (HDMI-A-1)
@@ -255,6 +256,55 @@ def build_parser() -> argparse.ArgumentParser:
         "--hud-size",
         default="full",
         help="Projector HUD size WxH or 'full' for native (default full)",
+    )
+
+    debug = sub.add_parser(
+        "debug",
+        help="Local debug GUI: live camera or examples/ images (no Pi/projector needed)",
+    )
+    debug.add_argument(
+        "--examples",
+        type=Path,
+        default=ROOT / "examples",
+        help="Folder of stills to use as camera input (default: examples/)",
+    )
+    debug.add_argument(
+        "--source",
+        choices=("images", "camera"),
+        default="images",
+        help="Initial frame source (default: images)",
+    )
+    debug.add_argument(
+        "--mode",
+        choices=("idle", "hands", "desk"),
+        default="desk",
+        help="Initial mode (default: desk)",
+    )
+    debug.add_argument(
+        "--camera-config",
+        type=Path,
+        default=DEFAULT_CAMERA_CONFIG,
+        help="Camera YAML (used when source=camera)",
+    )
+    debug.add_argument(
+        "--mat-config",
+        type=Path,
+        default=ROOT / "config" / "mat.yaml",
+        help="Mat YAML (default: config/mat.yaml)",
+    )
+    debug.add_argument("--device", type=int, default=None, help="Force camera index")
+    debug.add_argument("--no-undistort", action="store_true")
+    debug.add_argument(
+        "--measure-px-per-cm",
+        type=float,
+        default=20.0,
+        help="Warp resolution for object measure (default 20)",
+    )
+    debug.add_argument(
+        "--dump-dir",
+        type=Path,
+        default=ROOT / "debug_dumps",
+        help="Where s saves frames (default: debug_dumps/)",
     )
 
     sub.add_parser("projector-list", help="List Wayland outputs (wlr-randr)")
@@ -696,6 +746,26 @@ def cmd_idle(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_debug(args: argparse.Namespace) -> int:
+    from debug_mode import DebugGui
+    from src.measure.mat import load_mat_config
+
+    cam_cfg = _load_or_bootstrap_camera_config(args.camera_config)
+    mat_cfg = load_mat_config(args.mat_config)
+    gui = DebugGui(
+        examples_dir=args.examples,
+        mat_config=mat_cfg,
+        camera_config=cam_cfg,
+        device=args.device,
+        dump_dir=args.dump_dir,
+        measure_px_per_cm=float(args.measure_px_per_cm),
+        no_undistort=bool(args.no_undistort),
+        start_source=str(args.source),
+        start_mode=str(args.mode),
+    )
+    return gui.run()
+
+
 def cmd_desk(args: argparse.Namespace) -> int:
     """All-in-one live: mat find + object measure + hands + projector HUD."""
     import cv2
@@ -1072,6 +1142,7 @@ def main() -> int:
             "calibrate-camera",
             "hands",
             "idle",
+            "debug",
             "desk",
             "projector-list",
             "projector-test",
@@ -1089,6 +1160,8 @@ def main() -> int:
         return cmd_hands(args)
     if args.command == "idle":
         return cmd_idle(args)
+    if args.command == "debug":
+        return cmd_debug(args)
     if args.command == "desk":
         return cmd_desk(args)
     if args.command == "projector-list":
