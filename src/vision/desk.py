@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Optional, Sequence, Tuple
 
 import cv2
@@ -14,6 +15,9 @@ from src.measure.shape import ObjectAnalysis
 from src.vision.hands import HAND_CONNECTIONS, HandResult
 
 Point = Tuple[float, float]
+
+# Dim cyan (BGR) — quieter than live HUD cyan so idle stays cheap visually.
+IDLE_TIME_COLOR = (0, 140, 140)
 
 
 def format_object_metrics(analysis: ObjectAnalysis) -> str:
@@ -179,6 +183,33 @@ def _draw_hands(
         )
 
 
+def format_idle_time(now: Optional[datetime] = None) -> str:
+    """24h wall clock without seconds (idle HUD v1)."""
+    stamp = now or datetime.now()
+    return stamp.strftime("%H:%M")
+
+
+def draw_idle_hud(
+    canvas_bgr: np.ndarray,
+    *,
+    now: Optional[datetime] = None,
+) -> np.ndarray:
+    """Cheap idle projector HUD: near-black canvas + top-left dim-cyan time only."""
+    canvas_bgr[:] = 0
+    text = format_idle_time(now)
+    cv2.putText(
+        canvas_bgr,
+        text,
+        (24, 64),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        2.0,
+        IDLE_TIME_COLOR,
+        2,
+        cv2.LINE_AA,
+    )
+    return canvas_bgr
+
+
 def draw_desk_hud(
     canvas_bgr: np.ndarray,
     *,
@@ -193,7 +224,10 @@ def draw_desk_hud(
     measure_config: Optional[MatConfig] = None,
     overlays: Optional[OverlayFlags] = None,
 ) -> np.ndarray:
-    """Dark projector HUD: mat, object outline+cm, hand skeleton."""
+    """Dark projector HUD: mat, object outline+cm, hand skeleton.
+
+    Measure/work mode replaces idle entirely — do not composite the idle clock here.
+    """
     flags = overlays or OverlayFlags()
     canvas_bgr[:] = 0
     measure_cfg = measure_config or mat_config

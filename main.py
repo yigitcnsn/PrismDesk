@@ -5,6 +5,7 @@ Modes:
   measure           Photo edge measurement (existing)
   calibrate-camera  Chessboard fisheye/pinhole calibration for USB cam
   hands             Live hand tracking (optional --project HUD on HY300)
+  idle              Cheap projector HUD: top-left time only (no camera)
   desk              Mat find + object measure + hands + projector HUD
   projector-list    List Wayland outputs via wlr-randr
   projector-test    Fullscreen alignment pattern on HY300 (HDMI-A-1)
@@ -221,6 +222,39 @@ def build_parser() -> argparse.ArgumentParser:
         "--home-hub-url",
         default=None,
         help="Override home-hub base URL (e.g. http://127.0.0.1:3000)",
+    )
+    desk.add_argument(
+        "--then-idle",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="After desk/measure HUD ends, return to idle time HUD (default: on)",
+    )
+
+    idle = sub.add_parser(
+        "idle",
+        help="Cheap projector HUD: top-left wall-clock time only (no camera)",
+    )
+    idle.add_argument(
+        "--projector-config",
+        type=Path,
+        default=DEFAULT_PROJECTOR_CONFIG,
+        help="Projector YAML (default: config/projector.yaml)",
+    )
+    idle.add_argument(
+        "--output",
+        default=None,
+        help="Override projector output name (e.g. HDMI-A-1)",
+    )
+    idle.add_argument(
+        "--show",
+        choices=("auto", "mpv", "opencv"),
+        default="auto",
+        help="Projector sink (default: auto → ffplay/mpv)",
+    )
+    idle.add_argument(
+        "--hud-size",
+        default="full",
+        help="Projector HUD size WxH or 'full' for native (default full)",
     )
 
     sub.add_parser("projector-list", help="List Wayland outputs (wlr-randr)")
@@ -572,6 +606,96 @@ def cmd_hands(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_idle(args: argparse.Namespace) -> int:
+    """Cheap adaptive default: projector time HUD, no camera/vision."""
+    import cv2
+    import numpy as np
+
+    from src.vision.desk import draw_idle_hud, format_idle_time
+    from src.vision.projector import (
+        MpvFrameSink,
+        ProjectorSurface,
+        ensure_gui_env,
+        opencv_gui_hint,
+    )
+
+    try:
+        hud_size = _parse_size(args.hud_size, allow_full=True)
+    except ValueError as exc:
+        print(exc)
+        return 1
+
+    proj_cfg = _load_or_bootstrap_projector_config(args.projector_config)
+    if args.output:
+        proj_cfg.output_name = args.output
+    env = ensure_gui_env()
+    if env.get("fixed"):
+        print("auto-set:", ", ".join(env["fixed"]))
+    surface = ProjectorSurface(proj_cfg)
+    info = surface.prepare()
+    proj_w, proj_h = int(proj_cfg.width), int(proj_cfg.height)
+    if hud_size is None:
+        hud_w, hud_h = proj_w, proj_h
+    else:
+        hud_w, hud_h = hud_size
+    print(
+        f"Projector: {info.name} {info.width}x{info.height}@{info.refresh_hz:.3f}Hz "
+        f"hud={hud_w}x{hud_h} source={info.source}"
+    )
+
+    show = args.show if args.show != "auto" else "mpv"
+    mpv: MpvFrameSink | None = None
+    if show == "mpv":
+        try:
+            # ~1 FPS is enough for minute-resolution clock; keeps Pi cheap.
+            mpv = MpvFrameSink(hud_w, hud_h, fps=1.0)
+        except Exception as exc:  # noqa: BLE001
+            print(f"video sink failed: {exc}")
+            print(opencv_gui_hint())
+            return 1
+    elif show == "opencv":
+        try:
+            surface.open()
+        except Exception as exc:  # noqa: BLE001
+            print(opencv_gui_hint())
+            print(f"error: {exc}")
+            return 1
+
+    print("Idle HUD (time only) — Ctrl+C quit")
+    canvas = np.zeros((hud_h, hud_w, 3), dtype=np.uint8)
+    last_text = ""
+    try:
+        while True:
+            draw_idle_hud(canvas)
+            # Only log when the minute rolls to avoid spam.
+            text = format_idle_time()
+            if text != last_text:
+                print(text)
+                last_text = text
+            if mpv is not None:
+                mpv.show(canvas)
+                if not mpv.alive:
+                    print("video sink closed — exiting")
+                    break
+            else:
+                surface.show(canvas)
+                if cv2.waitKey(1000) & 0xFF == ord("q"):
+                    break
+                continue
+            time.sleep(1.0)
+    except KeyboardInterrupt:
+        print("\nInterrupted")
+    finally:
+        if mpv is not None:
+            mpv.close()
+        surface.close()
+        try:
+            cv2.destroyAllWindows()
+        except Exception:
+            pass
+    return 0
+
+
 def cmd_desk(args: argparse.Namespace) -> int:
     """All-in-one live: mat find + object measure + hands + projector HUD."""
     import cv2
@@ -810,6 +934,11 @@ def cmd_desk(args: argparse.Namespace) -> int:
             cv2.destroyAllWindows()
         except Exception:
             pass
+
+    # Adaptive HUD: measure/desk session ends → cheap idle time HUD.
+    if getattr(args, "then_idle", False):
+        print("Desk ended — returning to idle HUD")
+        return cmd_idle(args)
     return 0
 
 
@@ -942,6 +1071,7 @@ def main() -> int:
             "measure",
             "calibrate-camera",
             "hands",
+            "idle",
             "desk",
             "projector-list",
             "projector-test",
@@ -957,6 +1087,8 @@ def main() -> int:
         return cmd_calibrate_camera(args)
     if args.command == "hands":
         return cmd_hands(args)
+    if args.command == "idle":
+        return cmd_idle(args)
     if args.command == "desk":
         return cmd_desk(args)
     if args.command == "projector-list":
