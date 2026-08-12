@@ -95,20 +95,51 @@ def load_home_hub_config(path: str | Path) -> HomeHubConfig:
     )
 
 
-def overlays_from_config_payload(payload: Mapping[str, Any] | None) -> OverlayFlags:
+def _flags_from_mapping(raw: Any) -> OverlayFlags:
     flags = OverlayFlags()
-    if not payload:
+    if not isinstance(raw, Mapping):
         return flags
-    overlays = payload.get("overlays") if isinstance(payload, Mapping) else None
-    if not isinstance(overlays, Mapping):
-        return flags
-    if isinstance(overlays.get("mat"), bool):
-        flags.mat = bool(overlays["mat"])
-    if isinstance(overlays.get("object"), bool):
-        flags.object = bool(overlays["object"])
-    if isinstance(overlays.get("hands"), bool):
-        flags.hands = bool(overlays["hands"])
+    if isinstance(raw.get("mat"), bool):
+        flags.mat = bool(raw["mat"])
+    if isinstance(raw.get("object"), bool):
+        flags.object = bool(raw["object"])
+    if isinstance(raw.get("hands"), bool):
+        flags.hands = bool(raw["hands"])
     return flags
+
+
+def split_overlays_from_config(
+    payload: Mapping[str, Any] | None,
+) -> tuple[OverlayFlags, OverlayFlags]:
+    """Parse projector vs browser overlay toggles from hub config.
+
+    New shape:
+      { "projector": {mat,object,hands}, "browser": {mat,object,hands} }
+    Legacy:
+      { "overlays": {mat,object,hands} }  → applied to BOTH surfaces
+    """
+    if not payload:
+        return OverlayFlags(), OverlayFlags()
+
+    legacy = payload.get("overlays") if isinstance(payload.get("overlays"), Mapping) else None
+    proj_raw = payload.get("projector") if isinstance(payload.get("projector"), Mapping) else None
+    browser_raw = payload.get("browser") if isinstance(payload.get("browser"), Mapping) else None
+
+    if proj_raw is None and browser_raw is None and legacy is not None:
+        shared = _flags_from_mapping(legacy)
+        return shared, OverlayFlags(
+            mat=shared.mat, object=shared.object, hands=shared.hands
+        )
+
+    projector = _flags_from_mapping(proj_raw if proj_raw is not None else legacy)
+    browser = _flags_from_mapping(browser_raw if browser_raw is not None else legacy)
+    return projector, browser
+
+
+def overlays_from_config_payload(payload: Mapping[str, Any] | None) -> OverlayFlags:
+    """Legacy helper: projector overlays (falls back to flat overlays)."""
+    projector, _browser = split_overlays_from_config(payload)
+    return projector
 
 
 class HomeHubPublisher:
@@ -116,7 +147,9 @@ class HomeHubPublisher:
 
     def __init__(self, config: Optional[HomeHubConfig] = None) -> None:
         self.config = config or HomeHubConfig()
-        self.overlays = OverlayFlags()
+        # Separate surfaces: projector HUD vs browser debug composition.
+        self.projector_overlays = OverlayFlags()
+        self.browser_overlays = OverlayFlags()
         self._fail_streak = 0
         self._last_err = ""
 
@@ -128,15 +161,22 @@ class HomeHubPublisher:
     def enabled_layers(self) -> List[str]:
         return _normalize_layers(self.config.layers)
 
+    @property
+    def overlays(self) -> OverlayFlags:
+        """Backward-compatible alias for projector overlays."""
+        return self.projector_overlays
+
     def fetch_config(self) -> OverlayFlags:
         url = f"{self.config.base_url}/api/prismdesk/config"
         try:
             raw = self._request_json("GET", url)
-            self.overlays = overlays_from_config_payload(raw)
+            self.projector_overlays, self.browser_overlays = split_overlays_from_config(
+                raw if isinstance(raw, Mapping) else None
+            )
             self._fail_streak = 0
         except Exception as exc:  # noqa: BLE001
             self._note_fail(exc)
-        return self.overlays
+        return self.projector_overlays
 
     def publish(self, frame_bgr: np.ndarray, state: Dict[str, Any]) -> bool:
         """Backward-compatible: publish a single frame as the final layer."""
@@ -193,7 +233,9 @@ class HomeHubPublisher:
                         posted.append("final")
 
             payload = dict(state)
-            payload.setdefault("overlays", self.overlays.as_list())
+            payload.setdefault("overlays", self.projector_overlays.as_list())
+            payload.setdefault("projector_overlays", self.projector_overlays.as_list())
+            payload.setdefault("browser_overlays", self.browser_overlays.as_list())
             payload["layers"] = posted
             self._post_json(f"{self.config.base_url}/api/prismdesk/state", payload)
             self._fail_streak = 0

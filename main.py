@@ -972,7 +972,7 @@ def cmd_desk(args: argparse.Namespace) -> int:
             fps_live = frames / elapsed
             track_fps = track_frames / elapsed
 
-            overlays = hub.overlays if hub is not None else None
+            overlays = hub.projector_overlays if hub is not None else None
             draw_desk_hud(
                 hud,
                 hands=hands,
@@ -999,11 +999,11 @@ def cmd_desk(args: argparse.Namespace) -> int:
             if hub is not None:
                 if (frames - 1) % hub_cfg.config_every == 0:
                     hub.fetch_config()
-                    overlays = hub.overlays
                 if (frames - 1) % hub_cfg.publish_every == 0:
                     from src.core.home_hub import OverlayFlags
 
-                    flags = overlays or OverlayFlags()
+                    proj = hub.projector_overlays
+                    browser = hub.browser_overlays
                     layers = {}
                     want = set(hub.enabled_layers)
                     if "raw" in want:
@@ -1058,7 +1058,7 @@ def cmd_desk(args: argparse.Namespace) -> int:
                             mat_ok=mat_corners is not None,
                             analysis=analysis if do_object else None,
                             measure_config=measure_config,
-                            overlays=flags,
+                            overlays=browser,
                         )
                     state = {
                         "fps": round(fps_live, 2),
@@ -1071,7 +1071,9 @@ def cmd_desk(args: argparse.Namespace) -> int:
                             else None
                         ),
                         "capture": f"{frame.shape[1]}x{frame.shape[0]}",
-                        "overlays": hub.overlays.as_list(),
+                        "overlays": proj.as_list(),
+                        "projector_overlays": proj.as_list(),
+                        "browser_overlays": browser.as_list(),
                         "rotate": int(getattr(cfg, "rotate_degrees", 0) or 0),
                     }
                     hub.publish_layers(layers, state)
