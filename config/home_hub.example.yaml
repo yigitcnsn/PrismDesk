@@ -9,7 +9,7 @@
 #   GET  /api/prismdesk/latest.jpg      legacy alias for final
 #   GET  /api/prismdesk/config
 
-enabled: false
+enabled: true
 base_url: http://127.0.0.1:3000
 
 # Publish annotated camera JPEG every N desk frames

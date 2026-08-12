@@ -274,8 +274,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     desk.add_argument(
         "--home-hub",
-        action="store_true",
-        help="Publish annotated camera JPEG + state to home-hub PrismDesk debug UI",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Publish debug layers to home-hub (default: on; use --no-home-hub to disable)",
     )
     desk.add_argument(
         "--home-hub-config",
@@ -298,8 +299,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--rotate",
         type=int,
         choices=(0, 90, 180, 270),
-        default=None,
-        help="Rotate camera frames (default: camera.yaml rotate_degrees, else 0). Use 180 for upside-down mount.",
+        default=180,
+        help="Rotate camera frames (default: 180 for overhead mount)",
     )
 
     idle = sub.add_parser(
@@ -898,15 +899,12 @@ def cmd_debug(args: argparse.Namespace) -> int:
 def cmd_desk(args: argparse.Namespace) -> int:
     """All-in-one live: mat find + object measure + hands + projector HUD."""
     import cv2
-    import numpy as np
     from dataclasses import replace
 
     from src.core.home_hub import HomeHubPublisher, load_home_hub_config
-    from src.measure.mat import detect_mat_corners, load_mat_config
-    from src.measure.object import analyze_object
-    from src.measure.perspective import warp_to_mat_plane
+    from src.measure.mat import load_mat_config
     from src.vision.camera import Camera, ThreadedCamera
-    from src.vision.desk import draw_debug_camera, draw_desk_hud, format_object_metrics
+    from src.vision.desk_runtime import DeskRuntime, DeskRuntimeConfig
     from src.vision.hands import HandTracker
     from src.vision.projector import (
         MpvFrameSink,
@@ -925,15 +923,19 @@ def cmd_desk(args: argparse.Namespace) -> int:
         scale = measure_ppc / float(mat_config.px_per_cm)
         measure_config = replace(
             measure_config,
-            object_border_margin_px=max(4, int(round(mat_config.object_border_margin_px * scale))),
+            object_border_margin_px=max(
+                4, int(round(mat_config.object_border_margin_px * scale))
+            ),
         )
 
     hub_cfg = load_home_hub_config(args.home_hub_config)
     if not args.home_hub_config.is_file() and EXAMPLE_HOME_HUB_CONFIG.is_file():
-        # Keep defaults; only print once if user asked for hub.
-        pass
-    if args.home_hub:
+        print(f"{args.home_hub_config} missing — using defaults / example values")
+    # Desk defaults to home-hub on; YAML enabled flag still honored if --home-hub.
+    if bool(args.home_hub):
         hub_cfg.enabled = True
+    else:
+        hub_cfg.enabled = False
     if args.home_hub_url:
         hub_cfg.enabled = True
         hub_cfg.base_url = str(args.home_hub_url).rstrip("/")
@@ -941,7 +943,9 @@ def cmd_desk(args: argparse.Namespace) -> int:
 
     cfg = _load_or_bootstrap_camera_config(args.camera_config)
     if args.device is not None:
-        cfg.device_indices = [args.device] + [i for i in cfg.device_indices if i != args.device]
+        cfg.device_indices = [args.device] + [
+            i for i in cfg.device_indices if i != args.device
+        ]
     try:
         capture = _parse_size(args.capture, allow_full=True)
         track_size = _parse_size(args.track_size, allow_full=True)
@@ -951,8 +955,7 @@ def cmd_desk(args: argparse.Namespace) -> int:
         return 1
     if capture is not None:
         cfg.width, cfg.height = capture
-    if getattr(args, "rotate", None) is not None:
-        cfg.rotate_degrees = int(args.rotate)
+    cfg.rotate_degrees = int(args.rotate)
 
     und = Undistorter(cfg)
     if args.no_undistort:
@@ -1006,15 +1009,15 @@ def cmd_desk(args: argparse.Namespace) -> int:
         f"Desk: camera={idx} {w}x{h}@{fps:.1f} track={track_label} "
         f"every={track_every} mat_every={mat_every} object_every={object_every} "
         f"measure_ppc={measure_ppc:.0f} object={'on' if do_object else 'off'} "
-        f"capture=threaded "
+        f"threads=on home-hub={'on' if hub is not None else 'off'} "
         f"mat={mat_config.width_cm:.0f}x{mat_config.height_cm:.0f}cm "
         f"rotate={int(cfg.rotate_degrees)} "
         f"undistort={'on' if und.enabled else 'off'}"
     )
     if hub is not None:
         print(
-            f"home-hub: {hub_cfg.base_url} publish_every={hub_cfg.publish_every} "
-            f"config_every={hub_cfg.config_every}"
+            f"home-hub: {hub_cfg.base_url} layers={','.join(hub.enabled_layers)} "
+            f"(each layer on its own thread)"
         )
         hub.fetch_config()
 
@@ -1030,6 +1033,13 @@ def cmd_desk(args: argparse.Namespace) -> int:
             tracker.close()
             cam.close()
             return 1
+
+        def show_fn(frame_bgr):
+            mpv.show(frame_bgr)
+
+        def alive_fn() -> bool:
+            return mpv.alive
+
     elif show == "opencv":
         try:
             surface.open()
@@ -1039,182 +1049,43 @@ def cmd_desk(args: argparse.Namespace) -> int:
             tracker.close()
             cam.close()
             return 1
+
+        def show_fn(frame_bgr):
+            surface.show(frame_bgr)
+
+        def alive_fn() -> bool:
+            return True
+
+    else:
+        tracker.close()
+        cam.close()
+        return 1
+
+    runtime = DeskRuntime(
+        camera=cam,
+        tracker=tracker,
+        cfg=DeskRuntimeConfig(
+            mat_config=mat_config,
+            measure_config=measure_config,
+            undistorter=und,
+            track_every=track_every,
+            mat_every=mat_every,
+            object_every=object_every,
+            do_object=do_object,
+            homography=cam_proj_h,
+            rotate_degrees=int(cfg.rotate_degrees),
+            hub_publish_every=max(0.05, float(hub_cfg.publish_every) / max(sink_fps, 1.0)),
+            hub_config_every=max(0.2, float(hub_cfg.config_every) / max(sink_fps, 1.0)),
+        ),
+        hud_size=(hud_w, hud_h),
+        show_fn=show_fn,
+        alive_fn=alive_fn,
+        hub=hub,
+    )
     print("Desk HUD on projector — Ctrl+C quit")
-
-    frames = 0
-    track_frames = 0
-    t0 = time.time()
-    hud = np.zeros((hud_h, hud_w, 3), dtype=np.uint8)
-    hands = []
-    mat_corners = None
-    analysis = None
-    last_metrics = ""
+    runtime.start()
     try:
-        while True:
-            try:
-                frame = cam.read()
-            except RuntimeError as exc:
-                print(f"camera read failed (will retry): {exc}", flush=True)
-                cv2.putText(
-                    hud,
-                    "camera reconnecting…",
-                    (24, 64),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    1.0,
-                    (0, 140, 255),
-                    2,
-                    cv2.LINE_AA,
-                )
-                if mpv is not None:
-                    try:
-                        mpv.show(hud)
-                    except Exception:
-                        pass
-                else:
-                    try:
-                        surface.show(hud)
-                    except Exception:
-                        pass
-                time.sleep(1.0)
-                continue
-            if und.enabled and not args.no_undistort:
-                frame = und.apply(frame)
-            frames += 1
-
-            if (frames - 1) % track_every == 0:
-                hands = tracker.process(frame)
-                track_frames += 1
-            if (frames - 1) % mat_every == 0:
-                found = detect_mat_corners(frame, mat_config)
-                if found is not None:
-                    mat_corners = found
-            if (
-                do_object
-                and mat_corners is not None
-                and (frames - 1) % object_every == 0
-            ):
-                try:
-                    warped, _ = warp_to_mat_plane(frame, mat_corners, measure_config)
-                    analysis = analyze_object(warped, measure_config)
-                    if analysis is not None:
-                        metrics = format_object_metrics(analysis)
-                        if metrics != last_metrics:
-                            print(metrics)
-                            last_metrics = metrics
-                except Exception as exc:  # noqa: BLE001
-                    print(f"object measure skipped: {exc}")
-            elapsed = max(time.time() - t0, 1e-6)
-            fps_live = frames / elapsed
-            track_fps = track_frames / elapsed
-
-            overlays = hub.projector_overlays if hub is not None else None
-            draw_desk_hud(
-                hud,
-                hands=hands,
-                mat_corners=mat_corners,
-                mat_config=mat_config,
-                src_size=(frame.shape[1], frame.shape[0]),
-                fps_live=fps_live,
-                track_fps=track_fps,
-                mat_ok=mat_corners is not None,
-                analysis=analysis if do_object else None,
-                measure_config=measure_config,
-                overlays=overlays,
-                homography=cam_proj_h,
-            )
-            if mpv is not None:
-                mpv.show(hud)
-                if not mpv.alive:
-                    print("video sink closed — exiting")
-                    break
-            else:
-                surface.show(hud)
-                if cv2.waitKey(1) & 0xFF == ord("q"):
-                    break
-
-            if hub is not None:
-                if (frames - 1) % hub_cfg.config_every == 0:
-                    hub.fetch_config()
-                if (frames - 1) % hub_cfg.publish_every == 0:
-                    from src.core.home_hub import OverlayFlags
-
-                    proj = hub.projector_overlays
-                    browser = hub.browser_overlays
-                    layers = {}
-                    want = set(hub.enabled_layers)
-                    if "raw" in want:
-                        layers["raw"] = frame
-                    if "mat" in want:
-                        layers["mat"] = draw_debug_camera(
-                            frame,
-                            hands=[],
-                            mat_corners=mat_corners,
-                            mat_config=mat_config,
-                            fps_live=fps_live,
-                            track_fps=track_fps,
-                            mat_ok=mat_corners is not None,
-                            analysis=None,
-                            measure_config=measure_config,
-                            overlays=OverlayFlags(mat=True, object=False, hands=False),
-                        )
-                    if "hands" in want:
-                        layers["hands"] = draw_debug_camera(
-                            frame,
-                            hands=hands,
-                            mat_corners=None,
-                            mat_config=mat_config,
-                            fps_live=fps_live,
-                            track_fps=track_fps,
-                            mat_ok=False,
-                            analysis=None,
-                            measure_config=measure_config,
-                            overlays=OverlayFlags(mat=False, object=False, hands=True),
-                        )
-                    if "object" in want:
-                        layers["object"] = draw_debug_camera(
-                            frame,
-                            hands=[],
-                            mat_corners=mat_corners,
-                            mat_config=mat_config,
-                            fps_live=fps_live,
-                            track_fps=track_fps,
-                            mat_ok=mat_corners is not None,
-                            analysis=analysis if do_object else None,
-                            measure_config=measure_config,
-                            overlays=OverlayFlags(mat=False, object=True, hands=False),
-                        )
-                    if "final" in want:
-                        layers["final"] = draw_debug_camera(
-                            frame,
-                            hands=hands,
-                            mat_corners=mat_corners,
-                            mat_config=mat_config,
-                            fps_live=fps_live,
-                            track_fps=track_fps,
-                            mat_ok=mat_corners is not None,
-                            analysis=analysis if do_object else None,
-                            measure_config=measure_config,
-                            overlays=browser,
-                        )
-                    state = {
-                        "fps": round(fps_live, 2),
-                        "track_fps": round(track_fps, 2),
-                        "mat_locked": mat_corners is not None,
-                        "hands": len(hands),
-                        "object": (
-                            format_object_metrics(analysis)
-                            if analysis is not None
-                            else None
-                        ),
-                        "capture": f"{frame.shape[1]}x{frame.shape[0]}",
-                        "overlays": proj.as_list(),
-                        "projector_overlays": proj.as_list(),
-                        "browser_overlays": browser.as_list(),
-                        "rotate": int(getattr(cfg, "rotate_degrees", 0) or 0),
-                    }
-                    hub.publish_layers(layers, state)
-    except KeyboardInterrupt:
-        print("\nInterrupted")
+        runtime.run_until_stop()
     finally:
         tracker.close()
         cam.close()

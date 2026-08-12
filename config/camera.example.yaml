@@ -18,7 +18,7 @@ read_timeout_retries: 8
 skip_before_reopen: 16
 
 # Mount orientation (overhead cams are often upside-down): 0, 90, 180, or 270
-rotate_degrees: 0
+rotate_degrees: 180
 
 # Fisheye / pinhole model: "fisheye" or "pinhole"
 model: fisheye

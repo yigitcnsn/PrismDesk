@@ -14,8 +14,8 @@ Spatial AR workbench for Raspberry Pi 5: overhead camera + HY300 projector turn 
 | Camera calib | `python main.py calibrate-camera` | Chessboard → `config/camera.yaml` |
 | Projector calib | `python main.py calibrate-projector` | Projected chessboard → cam↔proj H in `config/projector.yaml` |
 | Hands | `python main.py hands [--project]` | MediaPipe Tasks HandLandmarker → optional HUD |
-| Desk (all-in-one) | `python main.py desk` | Mat + object measure + hands → projector HUD |
-| Desk → home-hub | `python main.py desk --home-hub` | Annotated camera JPEG + state to hub debug UI |
+| Desk (all-in-one) | `python main.py desk` | Defaults: capture 960x540, rotate 180, home-hub on, threaded layers |
+| Desk → home-hub | `python main.py desk` | Same — hub on by default (`--no-home-hub` to disable) |
 | Projector list | `python main.py projector-list` | DRM / wlr-randr / xrandr discovery |
 | Projector test | `python main.py projector-test` | Fullscreen alignment pattern |
 
@@ -144,17 +144,11 @@ python main.py hands --project --capture 960x540 --track-size 480x270 --hud-size
 
 ```bash
 python main.py desk
-# defaults: capture 960x540, track 480x270, hud 640x360, object measure on
-# python main.py desk --no-object
-# python main.py desk --object-every 20
-
-# Publish debug camera+overlays to home-hub PrismDesk page
-cp config/home_hub.example.yaml config/home_hub.yaml   # set enabled/base_url
-python main.py desk --home-hub
-# or: python main.py desk --home-hub-url http://127.0.0.1:3000
+# baked defaults: --capture 960x540 --rotate 180 --home-hub
+# --no-home-hub / --no-object / --rotate 0 if needed
 ```
 
-HUD shows mat outline, object edges/Ø/L×W in cm, hand skeleton, and index tip in mat-cm when the mat is locked. Keep hands off the mat while measuring if the silhouette gets confused.
+HUD shows FPS number only, plus mat/object/hands overlays. Vision + home-hub layers each run on their own thread.
 
 MediaPipe model downloads once to `models/hand_landmarker.task` on first run.
 
