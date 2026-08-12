@@ -24,6 +24,8 @@ from src.measure.mat import MatConfig, detect_mat_corners
 from src.measure.object import analyze_object
 from src.measure.perspective import warp_to_mat_plane
 from src.measure.shape import ObjectAnalysis
+from src.ui.audio_level import AudioLevelMeter
+from src.ui.control_panel import ControlPanel
 from src.vision.desk import draw_debug_camera, draw_desk_hud, format_object_metrics
 from src.vision.hands import HandResult, HandTracker
 from src.vision.homography import CamProjectorHomography
@@ -67,6 +69,9 @@ class _Shared:
     object_lock: threading.Lock = field(default_factory=threading.Lock)
     analysis: Optional[ObjectAnalysis] = None
     last_metrics: str = ""
+    # Projector Visual flags (desk panel + hub sync)
+    overlay_lock: threading.Lock = field(default_factory=threading.Lock)
+    projector_overlays: OverlayFlags = field(default_factory=OverlayFlags)
     # Display pacing
     display_count: int = 0
     t0: float = field(default_factory=time.time)
@@ -85,6 +90,8 @@ class DeskRuntime:
         show_fn: ShowFn,
         alive_fn: Optional[Callable[[], bool]] = None,
         hub: Optional[HomeHubPublisher] = None,
+        audio: Optional[AudioLevelMeter] = None,
+        enable_panel: bool = True,
     ) -> None:
         self._cam = camera
         self._tracker = tracker
@@ -93,11 +100,35 @@ class DeskRuntime:
         self._show = show_fn
         self._alive = alive_fn or (lambda: True)
         self._hub = hub
+        self._audio = audio
         self._shared = _Shared()
         self._threads: List[threading.Thread] = []
+        if hub is not None:
+            self._shared.projector_overlays = OverlayFlags(
+                mat=hub.projector_overlays.mat,
+                object=hub.projector_overlays.object,
+                hands=hub.projector_overlays.hands,
+            )
+        self._panel: Optional[ControlPanel] = None
+        if enable_panel:
+            self._panel = ControlPanel(on_visual_change=self._on_visual_change)
+            self._panel.set_flags(self._shared.projector_overlays)
+
+    def _on_visual_change(self, flags: OverlayFlags) -> None:
+        with self._shared.overlay_lock:
+            self._shared.projector_overlays = OverlayFlags(
+                mat=flags.mat, object=flags.object, hands=flags.hands
+            )
+        if self._hub is not None:
+            self._hub.push_config(flags, mirror_browser=True)
+        else:
+            # Keep local hub-less flags only.
+            pass
 
     def start(self) -> None:
         self._shared.t0 = time.time()
+        if self._audio is not None:
+            self._audio.start()
         workers = [
             ("desk-frame", self._frame_loop),
             ("desk-hands", self._hands_loop),
@@ -125,6 +156,8 @@ class DeskRuntime:
         for t in self._threads:
             t.join(timeout=2.0)
         self._threads.clear()
+        if self._audio is not None:
+            self._audio.stop()
 
     def run_until_stop(self) -> None:
         """Block until Ctrl+C / sink death / stop flag."""
@@ -288,10 +321,13 @@ class DeskRuntime:
                 )
             with self._shared.object_lock:
                 analysis = self._shared.analysis
+            with self._shared.overlay_lock:
+                overlays = OverlayFlags(
+                    mat=self._shared.projector_overlays.mat,
+                    object=self._shared.projector_overlays.object,
+                    hands=self._shared.projector_overlays.hands,
+                )
             fps_live, track_fps = self._fps()
-            overlays = (
-                self._hub.projector_overlays if self._hub is not None else None
-            )
             draw_desk_hud(
                 hud,
                 hands=hands,
@@ -306,6 +342,18 @@ class DeskRuntime:
                 overlays=overlays,
                 homography=self._cfg.homography,
             )
+            if self._panel is not None:
+                if self._audio is not None:
+                    self._panel.set_level(
+                        self._audio.level, available=self._audio.available
+                    )
+                self._panel.update(
+                    hands,
+                    src_size=(frame.shape[1], frame.shape[0]),
+                    hud_size=(self._hud_w, self._hud_h),
+                    homography=self._cfg.homography,
+                )
+                self._panel.draw(hud)
             try:
                 self._show(hud)
             except Exception as exc:  # noqa: BLE001
@@ -320,7 +368,13 @@ class DeskRuntime:
         every = max(0.2, float(self._cfg.hub_config_every))
         while not self._shared.stop.is_set():
             try:
-                self._hub.fetch_config()
+                flags = self._hub.fetch_config()
+                with self._shared.overlay_lock:
+                    self._shared.projector_overlays = OverlayFlags(
+                        mat=flags.mat, object=flags.object, hands=flags.hands
+                    )
+                if self._panel is not None:
+                    self._panel.set_flags(flags)
             except Exception:
                 pass
             self._shared.stop.wait(every)
@@ -336,6 +390,17 @@ class DeskRuntime:
                 mat_ok = self._shared.mat_corners is not None
             with self._shared.object_lock:
                 analysis = self._shared.analysis
+            with self._shared.overlay_lock:
+                local = OverlayFlags(
+                    mat=self._shared.projector_overlays.mat,
+                    object=self._shared.projector_overlays.object,
+                    hands=self._shared.projector_overlays.hands,
+                )
+            # Prefer desk-local flags for state so webpage sees pinch toggles immediately.
+            self._hub.projector_overlays = local
+            self._hub.browser_overlays = OverlayFlags(
+                mat=local.mat, object=local.object, hands=local.hands
+            )
             fps_live, track_fps = self._fps()
             proj = self._hub.projector_overlays
             browser = self._hub.browser_overlays
@@ -353,6 +418,11 @@ class DeskRuntime:
                 "overlays": proj.as_list(),
                 "projector_overlays": proj.as_list(),
                 "browser_overlays": browser.as_list(),
+                "config": {
+                    "projector": proj.as_dict(),
+                    "browser": browser.as_dict(),
+                    "overlays": proj.as_dict(),
+                },
                 "rotate": int(self._cfg.rotate_degrees),
             }
             try:
@@ -391,8 +461,13 @@ class DeskRuntime:
             )
         with self._shared.object_lock:
             analysis = self._shared.analysis
+        with self._shared.overlay_lock:
+            browser = OverlayFlags(
+                mat=self._shared.projector_overlays.mat,
+                object=self._shared.projector_overlays.object,
+                hands=self._shared.projector_overlays.hands,
+            )
         fps_live, track_fps = self._fps()
-        browser = self._hub.browser_overlays
         measure_cfg = self._cfg.measure_config
         mat_cfg = self._cfg.mat_config
         do_object = self._cfg.do_object

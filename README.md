@@ -145,6 +145,8 @@ python main.py hands --project --capture 960x540 --track-size 480x270 --hud-size
 ```bash
 python main.py desk
 # baked defaults: --capture 960x540 --rotate 180 --home-hub
+# Pinch **Controls** (bottom-right) → Visual toggles sync to home-hub webpage
+# Sound section shows mic level (USB cam mic / default input; needs sounddevice)
 # --no-home-hub / --no-object / --rotate 0 if needed
 ```
 

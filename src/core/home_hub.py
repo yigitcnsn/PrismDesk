@@ -11,6 +11,8 @@ and also to legacy /api/prismdesk/frame.
 from __future__ import annotations
 
 import json
+import threading
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
@@ -57,6 +59,23 @@ class OverlayFlags:
         if self.hands:
             out.append("hands")
         return out
+
+    def as_dict(self) -> dict[str, bool]:
+        return {
+            "mat": bool(self.mat),
+            "object": bool(self.object),
+            "hands": bool(self.hands),
+        }
+
+
+def overlay_config_payload(flags: OverlayFlags) -> dict[str, dict[str, bool]]:
+    """Hub PUT body: projector + browser mirrored (desk Visual toggles)."""
+    block = flags.as_dict()
+    return {
+        "projector": dict(block),
+        "browser": dict(block),
+        "overlays": dict(block),
+    }
 
 
 def _normalize_layers(raw: Any) -> List[str]:
@@ -146,8 +165,6 @@ class HomeHubPublisher:
     """POST layer JPEGs + state; poll overlay config."""
 
     def __init__(self, config: Optional[HomeHubConfig] = None) -> None:
-        import threading
-
         self.config = config or HomeHubConfig()
         # Separate surfaces: projector HUD vs browser debug composition.
         self.projector_overlays = OverlayFlags()
@@ -155,6 +172,7 @@ class HomeHubPublisher:
         self._fail_streak = 0
         self._last_err = ""
         self._lock = threading.RLock()
+        self._local_edit_until = 0.0
 
     @property
     def enabled(self) -> bool:
@@ -169,11 +187,18 @@ class HomeHubPublisher:
         """Backward-compatible alias for projector overlays."""
         return self.projector_overlays
 
+    def mark_local_edit(self, hold_s: float = 1.0) -> None:
+        """Ignore hub poll overwrites briefly after a desk-side toggle."""
+        with self._lock:
+            self._local_edit_until = time.monotonic() + max(0.0, float(hold_s))
+
     def fetch_config(self) -> OverlayFlags:
         url = f"{self.config.base_url}/api/prismdesk/config"
         try:
             raw = self._request_json("GET", url)
             with self._lock:
+                if time.monotonic() < self._local_edit_until:
+                    return self.projector_overlays
                 self.projector_overlays, self.browser_overlays = split_overlays_from_config(
                     raw if isinstance(raw, Mapping) else None
                 )
@@ -181,6 +206,48 @@ class HomeHubPublisher:
         except Exception as exc:  # noqa: BLE001
             self._note_fail(exc)
         return self.projector_overlays
+
+    def push_config(
+        self,
+        flags: OverlayFlags,
+        *,
+        mirror_browser: bool = True,
+        hold_s: float = 1.0,
+    ) -> bool:
+        """PUT overlay config so the webpage matches desk Visual toggles."""
+        if not self.enabled:
+            with self._lock:
+                self.projector_overlays = OverlayFlags(
+                    mat=flags.mat, object=flags.object, hands=flags.hands
+                )
+                if mirror_browser:
+                    self.browser_overlays = OverlayFlags(
+                        mat=flags.mat, object=flags.object, hands=flags.hands
+                    )
+            return False
+        browser = flags if mirror_browser else self.browser_overlays
+        payload = {
+            "projector": flags.as_dict(),
+            "browser": browser.as_dict() if not mirror_browser else flags.as_dict(),
+            "overlays": flags.as_dict(),
+        }
+        url = f"{self.config.base_url}/api/prismdesk/config"
+        try:
+            with self._lock:
+                self.projector_overlays = OverlayFlags(
+                    mat=flags.mat, object=flags.object, hands=flags.hands
+                )
+                if mirror_browser:
+                    self.browser_overlays = OverlayFlags(
+                        mat=flags.mat, object=flags.object, hands=flags.hands
+                    )
+                self._local_edit_until = time.monotonic() + max(0.0, float(hold_s))
+                self._put_json(url, payload)
+                self._fail_streak = 0
+            return True
+        except Exception as exc:  # noqa: BLE001
+            self._note_fail(exc)
+            return False
 
     def publish(self, frame_bgr: np.ndarray, state: Dict[str, Any]) -> bool:
         """Backward-compatible: publish a single frame as the final layer."""
@@ -351,6 +418,21 @@ class HomeHubPublisher:
                     raise RuntimeError(f"HTTP {resp.status} POST {url}")
         except urllib.error.HTTPError as exc:
             raise RuntimeError(f"HTTP {exc.code} POST {url}") from exc
+
+    def _put_json(self, url: str, payload: Dict[str, Any]) -> None:
+        data = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(
+            url,
+            data=data,
+            method="PUT",
+            headers={"Content-Type": "application/json", "Content-Length": str(len(data))},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=self.config.timeout_sec) as resp:
+                if resp.status >= 400:
+                    raise RuntimeError(f"HTTP {resp.status} PUT {url}")
+        except urllib.error.HTTPError as exc:
+            raise RuntimeError(f"HTTP {exc.code} PUT {url}") from exc
 
     def _request_json(self, method: str, url: str) -> Any:
         req = urllib.request.Request(url, method=method)

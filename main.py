@@ -903,6 +903,7 @@ def cmd_desk(args: argparse.Namespace) -> int:
 
     from src.core.home_hub import HomeHubPublisher, load_home_hub_config
     from src.measure.mat import load_mat_config
+    from src.ui.audio_level import AudioLevelMeter, load_audio_config
     from src.vision.camera import Camera, ThreadedCamera
     from src.vision.desk_runtime import DeskRuntime, DeskRuntimeConfig
     from src.vision.hands import HandTracker
@@ -913,6 +914,9 @@ def cmd_desk(args: argparse.Namespace) -> int:
         opencv_gui_hint,
     )
     from src.vision.undistort import Undistorter
+
+    DEFAULT_AUDIO = ROOT / "config" / "audio.yaml"
+    EXAMPLE_AUDIO = ROOT / "config" / "audio.example.yaml"
 
     mat_config = load_mat_config(args.mat_config)
     # Lighter warp for live FPS; outline maps back via same config's homography.
@@ -1061,6 +1065,14 @@ def cmd_desk(args: argparse.Namespace) -> int:
         cam.close()
         return 1
 
+    audio_path = DEFAULT_AUDIO if DEFAULT_AUDIO.is_file() else EXAMPLE_AUDIO
+    audio_cfg = load_audio_config(audio_path)
+    audio = AudioLevelMeter(audio_cfg)
+    if audio_cfg.device is not None:
+        print(f"audio: device={audio_cfg.device!r}")
+    else:
+        print("audio: default input device (USB cam mic if selected by OS)")
+
     runtime = DeskRuntime(
         camera=cam,
         tracker=tracker,
@@ -1081,6 +1093,8 @@ def cmd_desk(args: argparse.Namespace) -> int:
         show_fn=show_fn,
         alive_fn=alive_fn,
         hub=hub,
+        audio=audio,
+        enable_panel=True,
     )
     print("Desk HUD on projector — Ctrl+C quit")
     runtime.start()

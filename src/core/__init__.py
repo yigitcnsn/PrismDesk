@@ -6,6 +6,7 @@ from .home_hub import (
     HomeHubPublisher,
     OverlayFlags,
     load_home_hub_config,
+    overlay_config_payload,
     split_overlays_from_config,
 )
 
@@ -15,5 +16,6 @@ __all__ = [
     "HomeHubPublisher",
     "OverlayFlags",
     "load_home_hub_config",
+    "overlay_config_payload",
     "split_overlays_from_config",
 ]

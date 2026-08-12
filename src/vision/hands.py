@@ -57,6 +57,7 @@ class HandResult:
     landmarks_px: List[Point]
     landmarks_norm: List[Point]
     index_tip: Point
+    thumb_tip: Point
     handedness: str
 
 
@@ -151,11 +152,13 @@ class HandTracker:
             if i < len(handedness_list) and handedness_list[i]:
                 label = handedness_list[i][0].category_name
             tip = pts[8] if len(pts) > 8 else (pts[0] if pts else (0.0, 0.0))
+            thumb = pts[4] if len(pts) > 4 else tip
             hands.append(
                 HandResult(
                     landmarks_px=pts,
                     landmarks_norm=norms,
                     index_tip=tip,
+                    thumb_tip=thumb,
                     handedness=label,
                 )
             )

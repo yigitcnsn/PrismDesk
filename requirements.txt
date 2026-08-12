@@ -11,3 +11,6 @@ opencv-python>=4.8.0; platform_machine != "aarch64"
 
 # Hand tracking (Tasks API; mp.solutions removed in mediapipe>=0.10.30)
 mediapipe>=0.10.9
+
+# Mic level meter for desk control panel (needs PortAudio on Pi: portaudio19-dev)
+sounddevice>=0.4.6

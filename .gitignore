@@ -30,6 +30,7 @@ config/*.local.yml
 config/camera.yaml
 config/projector.yaml
 config/home_hub.yaml
+config/audio.yaml
 
 # --- Python ---
 __pycache__/
