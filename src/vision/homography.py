@@ -93,12 +93,16 @@ def make_chessboard_pattern(
     height: int,
     board_size: Tuple[int, int] = (9, 6),
     *,
-    margin_frac: float = 0.06,
+    margin_frac: float = 0.01,
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """Full-canvas chessboard for projector calib.
+    """Nearly full-canvas chessboard for projector calib.
+
+    Cells may be rectangular (not square) so the board fills the projector
+    frame; homography only needs known projector-pixel corner coords.
 
     Returns (BGR image, projector-pixel coords of inner corners Nx2).
     Corner order matches OpenCV findChessboardCorners (row-major).
+    Clean B/W only — no HUD text (that breaks detection).
     """
     cols, rows = board_size
     if cols < 2 or rows < 2:
@@ -106,43 +110,33 @@ def make_chessboard_pattern(
     squares_x = cols + 1
     squares_y = rows + 1
 
-    margin_x = int(round(width * margin_frac))
-    margin_y = int(round(height * margin_frac))
+    # Keep a thin border so edge corners stay inside the projected light field.
+    margin_x = max(4, int(round(width * margin_frac)))
+    margin_y = max(4, int(round(height * margin_frac)))
     usable_w = max(squares_x, width - 2 * margin_x)
     usable_h = max(squares_y, height - 2 * margin_y)
-    sq = max(1, min(usable_w // squares_x, usable_h // squares_y))
-    board_w = sq * squares_x
-    board_h = sq * squares_y
-    ox = (width - board_w) // 2
-    oy = (height - board_h) // 2
+    # Stretch cells to fill usable area (non-square OK for plane H).
+    cell_w = usable_w / float(squares_x)
+    cell_h = usable_h / float(squares_y)
+    ox = float(margin_x)
+    oy = float(margin_y)
 
     img = np.zeros((height, width, 3), dtype=np.uint8)
     for j in range(squares_y):
         for i in range(squares_x):
             if (i + j) % 2 == 0:
-                x0 = ox + i * sq
-                y0 = oy + j * sq
-                img[y0 : y0 + sq, x0 : x0 + sq] = 255
-
-    # Thin cyan border so the projected max canvas stays obvious on camera.
-    cv2.rectangle(img, (2, 2), (width - 3, height - 3), (255, 255, 0), 2)
-    cv2.putText(
-        img,
-        f"cam-proj calib {cols}x{rows}  SPACE=sample  c=save  q=quit",
-        (24, 40),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.9,
-        (0, 255, 255),
-        2,
-        cv2.LINE_AA,
-    )
+                x0 = int(round(ox + i * cell_w))
+                y0 = int(round(oy + j * cell_h))
+                x1 = int(round(ox + (i + 1) * cell_w))
+                y1 = int(round(oy + (j + 1) * cell_h))
+                img[y0:y1, x0:x1] = 255
 
     proj_corners = np.zeros((rows * cols, 2), dtype=np.float64)
     idx = 0
     for r in range(rows):
         for c in range(cols):
-            proj_corners[idx, 0] = ox + (c + 1) * sq
-            proj_corners[idx, 1] = oy + (r + 1) * sq
+            proj_corners[idx, 0] = ox + (c + 1) * cell_w
+            proj_corners[idx, 1] = oy + (r + 1) * cell_h
             idx += 1
     return img, proj_corners
 
@@ -211,22 +205,61 @@ def parse_board_size(text: str) -> Tuple[int, int]:
     return int(a), int(b)
 
 
+def _refine_corners(gray: np.ndarray, corners: np.ndarray) -> np.ndarray:
+    refined = cv2.cornerSubPix(
+        gray,
+        corners.reshape(-1, 1, 2).astype(np.float32),
+        (11, 11),
+        (-1, -1),
+        (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 40, 0.001),
+    )
+    return refined.reshape(-1, 2).astype(np.float64)
+
+
+def _try_find_chessboard(
+    gray: np.ndarray,
+    board_size: Tuple[int, int],
+) -> Tuple[bool, Optional[np.ndarray]]:
+    cols, rows = board_size
+    flags = (
+        cv2.CALIB_CB_ADAPTIVE_THRESH
+        + cv2.CALIB_CB_NORMALIZE_IMAGE
+        + cv2.CALIB_CB_FILTER_QUADS
+    )
+    found, corners = cv2.findChessboardCorners(gray, (cols, rows), flags)
+    if found and corners is not None:
+        return True, _refine_corners(gray, corners)
+
+    # SB is slower but much better on soft / projected boards.
+    if hasattr(cv2, "findChessboardCornersSB"):
+        sb_flags = 0
+        for name in ("CALIB_CB_EXHAUSTIVE", "CALIB_CB_ACCURACY"):
+            sb_flags |= int(getattr(cv2, name, 0))
+        try:
+            found, corners = cv2.findChessboardCornersSB(gray, (cols, rows), sb_flags)
+            if found and corners is not None:
+                return True, corners.reshape(-1, 2).astype(np.float64)
+        except cv2.error:
+            pass
+    return False, None
+
+
 def find_projected_chessboard(
     frame_bgr: np.ndarray,
     board_size: Tuple[int, int],
 ) -> Tuple[bool, Optional[np.ndarray]]:
-    """Detect projected chessboard corners in a camera frame."""
-    cols, rows = board_size
+    """Detect projected chessboard corners in a camera frame.
+
+    Tries CLAHE + inverted polarity; prefers findChessboardCornersSB when present.
+    """
     gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
-    flags = cv2.CALIB_CB_ADAPTIVE_THRESH + cv2.CALIB_CB_NORMALIZE_IMAGE
-    found, corners = cv2.findChessboardCorners(gray, (cols, rows), flags)
-    if not found:
-        return False, None
-    corners = cv2.cornerSubPix(
-        gray,
-        corners,
-        (11, 11),
-        (-1, -1),
-        (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001),
-    )
-    return True, corners.reshape(-1, 2).astype(np.float64)
+    # Boost local contrast (projector wash / uneven desk lighting).
+    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+    enhanced = clahe.apply(gray)
+
+    for candidate in (enhanced, gray, cv2.bitwise_not(enhanced), cv2.bitwise_not(gray)):
+        found, corners = _try_find_chessboard(candidate, board_size)
+        if found and corners is not None:
+            return True, corners
+    return False, None
+

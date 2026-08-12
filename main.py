@@ -83,8 +83,8 @@ def build_parser() -> argparse.ArgumentParser:
     calib_proj.add_argument("--device", type=int, default=None, help="Force V4L2 index")
     calib_proj.add_argument(
         "--board",
-        default="9x6",
-        help="Inner corners WxH (default 9x6)",
+        default="7x5",
+        help="Inner corners WxH (default 7x5; easier lock than 9x6 on soft projection)",
     )
     calib_proj.add_argument(
         "--output",

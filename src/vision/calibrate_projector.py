@@ -209,6 +209,8 @@ def run_projector_homography_calibration(
         + ("; --auto-save on" if auto_save else "")
         + ")"
     )
+    dump_path = Path("/tmp/prismdesk-calib-cam.jpg")
+    print(f"Writing seek debug frame → {dump_path} every ~30 frames")
 
     cam_samples: List[np.ndarray] = []
     proj_samples: List[np.ndarray] = []
@@ -261,6 +263,11 @@ def run_projector_homography_calibration(
                     stable=stable,
                     stable_need=stable_need,
                 )
+                if frames % 30 == 1:
+                    try:
+                        cv2.imwrite(str(dump_path), display)
+                    except Exception:
+                        pass
                 if cam_sink is not None:
                     cam_sink.show(display)
                     if not cam_sink.alive:

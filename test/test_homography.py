@@ -29,6 +29,23 @@ class TestHomography(unittest.TestCase):
         self.assertGreater(proj[:, 1].min(), 0)
         self.assertLess(proj[:, 0].max(), 640)
         self.assertLess(proj[:, 1].max(), 360)
+        # Nearly full-bleed (rectangular cells); >90% of pixels are board area.
+        white = int(np.count_nonzero(pattern[:, :, 0] == 255))
+        black = int(np.count_nonzero(pattern[:, :, 0] == 0))
+        self.assertGreater(white + black, 0.9 * 640 * 360)
+
+    def test_find_projected_chessboard_on_clean_pattern(self):
+        from src.vision.homography import find_projected_chessboard
+
+        pattern, _proj = make_chessboard_pattern(800, 600, (5, 4), margin_frac=0.02)
+        # Mild downscale + blur mimics camera seeing a projected board.
+        cam = cv2.resize(pattern, (640, 480), interpolation=cv2.INTER_AREA)
+        cam = cv2.GaussianBlur(cam, (3, 3), 0)
+        found, corners = find_projected_chessboard(cam, (5, 4))
+        self.assertTrue(found)
+        self.assertIsNotNone(corners)
+        assert corners is not None
+        self.assertEqual(corners.shape, (20, 2))
 
     def test_estimate_homography_recovers_synthetic_warp(self):
         _pattern, proj = make_chessboard_pattern(640, 360, (5, 4))
