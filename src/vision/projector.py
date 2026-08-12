@@ -624,17 +624,26 @@ def show_image_external(path: str | Path, tool: str = "mpv") -> int:
 
 
 class MpvFrameSink:
-    """Live fullscreen BGR frames via ffplay/mpv rawvideo stdin.
+    """Live BGR frames via ffplay/mpv rawvideo stdin.
 
     Prefers ffplay (stable for pipes). Falls back to mpv. Writes a black
     priming frame immediately so the demuxer does not EOF before video starts.
+    Use fullscreen=True for the projector HUD; False for a windowed debug view.
     """
 
-    def __init__(self, width: int, height: int, fps: float = 30.0) -> None:
+    def __init__(
+        self,
+        width: int,
+        height: int,
+        fps: float = 30.0,
+        *,
+        fullscreen: bool = True,
+    ) -> None:
         ensure_gui_env()
         self.width = int(width)
         self.height = int(height)
         self.fps = float(fps) if fps > 0 else 30.0
+        self.fullscreen = bool(fullscreen)
         self._frame_bytes = self.width * self.height * 3
         self._err_path = Path("/tmp/prismdesk-video-sink.log")
         self._err_file = self._err_path.open("w", encoding="utf-8")
@@ -666,7 +675,7 @@ class MpvFrameSink:
                 continue
             time.sleep(0.05)
             if self.alive:
-                print(f"video sink: {backend}")
+                print(f"video sink: {backend}{' (windowed)' if not self.fullscreen else ''}")
                 return
             last_err = f"{backend} exited after prime: {self._read_err()}"
             self._kill_quiet()
@@ -682,52 +691,49 @@ class MpvFrameSink:
         size = f"{self.width}x{self.height}"
         fps = f"{self.fps:.3f}"
         if shutil.which("ffplay"):
-            out.append(
-                (
-                    "ffplay",
-                    [
-                        "ffplay",
-                        "-fs",
-                        "-an",
-                        "-sn",
-                        "-noborder",
-                        "-autoexit",
-                        "-loglevel",
-                        "error",
-                        "-f",
-                        "rawvideo",
-                        "-pixel_format",
-                        "bgr24",
-                        "-video_size",
-                        size,
-                        "-framerate",
-                        fps,
-                        "-i",
-                        "pipe:0",
-                    ],
-                )
-            )
+            ff = [
+                "ffplay",
+                "-an",
+                "-sn",
+                "-autoexit",
+                "-loglevel",
+                "error",
+                "-f",
+                "rawvideo",
+                "-pixel_format",
+                "bgr24",
+                "-video_size",
+                size,
+                "-framerate",
+                fps,
+                "-i",
+                "pipe:0",
+            ]
+            if self.fullscreen:
+                ff[1:1] = ["-fs", "-noborder"]
+            else:
+                ff[1:1] = ["-window_title", "prismdesk-cam"]
+            out.append(("ffplay", ff))
         if shutil.which("mpv"):
-            out.append(
-                (
-                    "mpv",
-                    [
-                        "mpv",
-                        "--fs",
-                        "--no-cache",
-                        "--untimed",
-                        "--keep-open=yes",
-                        "--osc=no",
-                        "--msg-level=all=error",
-                        f"--demuxer-rawvideo-w={self.width}",
-                        f"--demuxer-rawvideo-h={self.height}",
-                        f"--demuxer-rawvideo-fps={fps}",
-                        "--demuxer-rawvideo-mp=bgr24",
-                        "--demuxer=rawvideo",
-                        "-",
-                    ],
-                )
-            )
+            mpv_cmd = [
+                "mpv",
+                "--no-cache",
+                "--untimed",
+                "--keep-open=yes",
+                "--osc=no",
+                "--msg-level=all=error",
+                f"--demuxer-rawvideo-w={self.width}",
+                f"--demuxer-rawvideo-h={self.height}",
+                f"--demuxer-rawvideo-fps={fps}",
+                "--demuxer-rawvideo-mp=bgr24",
+                "--demuxer=rawvideo",
+                "-",
+            ]
+            if self.fullscreen:
+                mpv_cmd.insert(1, "--fs")
+            else:
+                mpv_cmd.insert(1, "--title=prismdesk-cam")
+            out.append(("mpv", mpv_cmd))
         if not out:
             raise RuntimeError(
                 "Neither ffplay nor mpv found — sudo apt install ffmpeg mpv"

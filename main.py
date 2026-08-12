@@ -95,12 +95,23 @@ def build_parser() -> argparse.ArgumentParser:
         "--show",
         choices=("auto", "mpv", "opencv"),
         default="mpv",
-        help="How to show the projected pattern (default: mpv)",
+        help="How to show the projected pattern (default: mpv/ffplay; avoid opencv on Pi)",
     )
     calib_proj.add_argument(
-        "--no-preview",
+        "--cam-preview",
         action="store_true",
-        help="Do not open local OpenCV camera preview",
+        help="Windowed ffplay/mpv annotated camera (off by default; not fullscreen)",
+    )
+    calib_proj.add_argument(
+        "--auto-save",
+        action="store_true",
+        help="Save as soon as one stable sample is captured (no 'c' needed)",
+    )
+    calib_proj.add_argument(
+        "--stable-frames",
+        type=int,
+        default=20,
+        help="Consecutive locked frames before auto-sample (default 20)",
     )
     calib_proj.add_argument("--no-undistort", action="store_true")
     calib_proj.add_argument(
@@ -536,7 +547,9 @@ def cmd_calibrate_projector(args: argparse.Namespace) -> int:
         output_path=out_path,
         board_size=parse_board_size(args.board),
         show=str(args.show),
-        preview=not bool(args.no_preview),
+        cam_preview=bool(args.cam_preview),
+        auto_save=bool(args.auto_save),
+        stable_frames=int(args.stable_frames),
         no_undistort=bool(args.no_undistort),
     )
     return 0

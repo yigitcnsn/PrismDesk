@@ -127,8 +127,10 @@ Assumes the full projector canvas is visible in the overhead camera. Projects a 
 
 ```bash
 # Prefer same capture size + rotate you use for desk
-python main.py calibrate-projector --capture 960x540
-# SPACE when corners lock  |  c save  |  q quit
+python main.py calibrate-projector --capture 960x540 --rotate 180
+# Pattern on projector via ffplay/mpv; status in terminal (no OpenCV GUI)
+# Wait for board=yes → auto-sample → press c   (or add --auto-save)
+# Optional windowed cam view: --cam-preview
 python main.py desk
 ```
 
