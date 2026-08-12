@@ -265,11 +265,10 @@ def draw_desk_hud(
             canvas_bgr, hands, mat_corners, mat_config, src_size, homography
         )
 
-    status = "mat:lock" if mat_ok else "mat:--"
-    obj = "obj:yes" if analysis is not None else "obj:--"
+    # Projector HUD: FPS number only (no status chrome).
     cv2.putText(
         canvas_bgr,
-        f"fps={fps_live:.1f}  track={track_fps:.1f}Hz  hands={len(hands)}  {status}  {obj}",
+        f"{fps_live:.0f}",
         (16, 28),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.55,

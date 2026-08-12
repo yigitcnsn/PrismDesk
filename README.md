@@ -174,7 +174,7 @@ MediaPipe model downloads once to `models/hand_landmarker.task` on first run.
 
 ### Next
 
-- [ ] Higher live FPS (threading / lighter capture)
+- [ ] Higher live FPS (threaded capture done; infer/display split next)
 - [ ] Final overhead mount (Cam 3 Wide + HY300)
 - [ ] Gesture widgets (hover / pinch / buttons)
 - [ ] `pi-llm` + `home-hub` bridges

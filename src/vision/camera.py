@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -346,3 +347,87 @@ class Camera:
         h = int(self._cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         fps = float(self._cap.get(cv2.CAP_PROP_FPS))
         return w, h, fps
+
+
+class ThreadedCamera:
+    """Always-on capture thread; ``read()`` returns the latest frame (non-blocking).
+
+    Keeps the USB pipe draining so the desk loop is not paced by blocking V4L2 reads.
+    """
+
+    def __init__(self, camera: Camera) -> None:
+        self._cam = camera
+        self._lock = threading.Lock()
+        self._thread: Optional[threading.Thread] = None
+        self._stop = threading.Event()
+        self._frame: Optional[np.ndarray] = None
+        self._error: Optional[BaseException] = None
+
+    @property
+    def config(self) -> CameraConfig:
+        return self._cam.config
+
+    @property
+    def active_index(self) -> Optional[int]:
+        return self._cam.active_index
+
+    def open(self) -> int:
+        idx = self._cam.open()
+        self._stop.clear()
+        self._error = None
+        self._thread = threading.Thread(
+            target=self._loop,
+            name="prismdesk-cam",
+            daemon=True,
+        )
+        self._thread.start()
+        # Wait briefly for first frame so callers don't race an empty buffer.
+        deadline = time.time() + 2.0
+        while time.time() < deadline:
+            with self._lock:
+                if self._frame is not None:
+                    return idx
+                if self._error is not None:
+                    raise RuntimeError(f"ThreadedCamera failed: {self._error}") from self._error
+            time.sleep(0.01)
+        return idx
+
+    def _loop(self) -> None:
+        while not self._stop.is_set():
+            try:
+                frame = self._cam.read()
+            except BaseException as exc:  # noqa: BLE001 — surface to readers
+                self._error = exc
+                time.sleep(0.05)
+                continue
+            with self._lock:
+                self._frame = frame
+                self._error = None
+
+    def read(self) -> np.ndarray:
+        with self._lock:
+            err = self._error
+            frame = self._frame
+        if frame is None:
+            if err is not None:
+                raise RuntimeError(f"ThreadedCamera failed: {err}") from err
+            raise RuntimeError("ThreadedCamera has no frame yet")
+        return frame
+
+    def negotiated(self) -> Tuple[int, int, float]:
+        return self._cam.negotiated()
+
+    def close(self) -> None:
+        self._stop.set()
+        thread = self._thread
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=2.0)
+        self._thread = None
+        self._cam.close()
+
+    def __enter__(self) -> "ThreadedCamera":
+        self.open()
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        self.close()

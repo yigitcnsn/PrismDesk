@@ -1,6 +1,6 @@
 """Live vision: USB camera, calibration, hand tracking, projector."""
 
-from .camera import Camera, CameraConfig, load_camera_config, save_camera_config
+from .camera import Camera, CameraConfig, ThreadedCamera, load_camera_config, save_camera_config
 from .projector import (
     MpvFrameSink,
     ProjectorConfig,
@@ -12,6 +12,7 @@ from .projector import (
 __all__ = [
     "Camera",
     "CameraConfig",
+    "ThreadedCamera",
     "MpvFrameSink",
     "ProjectorConfig",
     "ProjectorSurface",
