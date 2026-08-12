@@ -230,6 +230,13 @@ def build_parser() -> argparse.ArgumentParser:
         default=True,
         help="After desk/measure HUD ends, return to idle time HUD (default: on)",
     )
+    desk.add_argument(
+        "--rotate",
+        type=int,
+        choices=(0, 90, 180, 270),
+        default=None,
+        help="Rotate camera frames (default: camera.yaml rotate_degrees, else 0). Use 180 for upside-down mount.",
+    )
 
     idle = sub.add_parser(
         "idle",
@@ -822,6 +829,8 @@ def cmd_desk(args: argparse.Namespace) -> int:
         return 1
     if capture is not None:
         cfg.width, cfg.height = capture
+    if getattr(args, "rotate", None) is not None:
+        cfg.rotate_degrees = int(args.rotate)
 
     und = Undistorter(cfg)
     if args.no_undistort:
@@ -865,6 +874,7 @@ def cmd_desk(args: argparse.Namespace) -> int:
         f"every={track_every} mat_every={mat_every} object_every={object_every} "
         f"measure_ppc={measure_ppc:.0f} object={'on' if do_object else 'off'} "
         f"mat={mat_config.width_cm:.0f}x{mat_config.height_cm:.0f}cm "
+        f"rotate={int(cfg.rotate_degrees)} "
         f"undistort={'on' if und.enabled else 'off'}"
     )
     if hub is not None:

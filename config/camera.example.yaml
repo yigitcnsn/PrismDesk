@@ -12,9 +12,13 @@ fps: 50
 fourcc: MJPG
 
 # Drop/recover
-max_consecutive_bad_frames: 8
-reopen_sleep_sec: 0.35
-read_timeout_retries: 3
+max_consecutive_bad_frames: 24
+reopen_sleep_sec: 0.5
+read_timeout_retries: 8
+skip_before_reopen: 16
+
+# Mount orientation (overhead cams are often upside-down): 0, 90, 180, or 270
+rotate_degrees: 0
 
 # Fisheye / pinhole model: "fisheye" or "pinhole"
 model: fisheye

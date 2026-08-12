@@ -41,6 +41,8 @@ class CameraConfig:
     read_timeout_retries: int = 8
     # How many cheap skip-reads to try before counting toward reopen.
     skip_before_reopen: int = 16
+    # Mount orientation: 0, 90, 180, or 270 (overhead cams are often mounted upside-down).
+    rotate_degrees: int = 0
     model: str = "fisheye"
     camera_matrix: Optional[np.ndarray] = None
     dist_coeffs: Optional[np.ndarray] = None
@@ -64,6 +66,7 @@ def load_camera_config(path: str | Path) -> CameraConfig:
         reopen_sleep_sec=float(raw.get("reopen_sleep_sec", 0.5)),
         read_timeout_retries=int(raw.get("read_timeout_retries", 8)),
         skip_before_reopen=int(raw.get("skip_before_reopen", 16)),
+        rotate_degrees=int(raw.get("rotate_degrees", 0)),
         model=str(raw.get("model", "fisheye")),
     )
     if raw.get("camera_matrix") is not None:
@@ -89,6 +92,7 @@ def save_camera_config(path: str | Path, cfg: CameraConfig) -> None:
         "reopen_sleep_sec": cfg.reopen_sleep_sec,
         "read_timeout_retries": cfg.read_timeout_retries,
         "skip_before_reopen": cfg.skip_before_reopen,
+        "rotate_degrees": int(cfg.rotate_degrees),
         "model": cfg.model,
         "camera_matrix": cfg.camera_matrix.tolist() if cfg.camera_matrix is not None else None,
         "dist_coeffs": cfg.dist_coeffs.tolist() if cfg.dist_coeffs is not None else None,
@@ -225,6 +229,19 @@ class Camera:
             pass
         return cap
 
+    def _orient(self, frame: np.ndarray) -> np.ndarray:
+        """Apply mount rotation from config (0/90/180/270)."""
+        deg = int(self.config.rotate_degrees or 0) % 360
+        if deg == 0:
+            return frame
+        if deg == 180:
+            return cv2.rotate(frame, cv2.ROTATE_180)
+        if deg == 90:
+            return cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
+        if deg == 270:
+            return cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
+        return frame
+
     def read(self) -> np.ndarray:
         """
         Return a good BGR frame.
@@ -243,8 +260,9 @@ class Camera:
             grabbed, frame = self._cap.read()
             if grabbed and is_frame_ok(frame, self.config.width, self.config.height):
                 self._bad_streak = 0
-                self._last_good = frame
-                return frame
+                oriented = self._orient(frame)
+                self._last_good = oriented
+                return oriented
             self._bad_streak += 1
             self._corrupt_skips += 1
             # Prefer holding last good frame over tearing down USB for a blip.
@@ -279,9 +297,10 @@ class Camera:
                 grabbed, frame = self._cap.read()
                 if grabbed and is_frame_ok(frame, self.config.width, self.config.height):
                     self._bad_streak = 0
-                    self._last_good = frame
+                    oriented = self._orient(frame)
+                    self._last_good = oriented
                     print("camera: recovered", flush=True)
-                    return frame
+                    return oriented
                 time.sleep(0.01)
             if self._last_good is not None:
                 print("camera: reopen still noisy — using last good frame", flush=True)
