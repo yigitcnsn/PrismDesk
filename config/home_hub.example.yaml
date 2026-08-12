@@ -2,8 +2,11 @@
 # Copy to config/home_hub.yaml (gitignored) and set enabled: true.
 #
 # Hub module endpoints (default port — change to match your home-hub):
-#   POST /api/prismdesk/frame
+#   POST /api/prismdesk/frame/<layer>   layer: raw|mat|hands|object|final
+#   POST /api/prismdesk/frame           legacy alias for final
 #   POST /api/prismdesk/state
+#   GET  /api/prismdesk/latest.jpg/<layer>
+#   GET  /api/prismdesk/latest.jpg      legacy alias for final
 #   GET  /api/prismdesk/config
 
 enabled: false
@@ -18,3 +21,11 @@ jpeg_quality: 75
 max_bytes: 819200
 max_dim: 960
 timeout_sec: 1.5
+
+# Multi-panel debug layers to publish (omit to send all)
+layers:
+  - raw
+  - mat
+  - hands
+  - object
+  - final

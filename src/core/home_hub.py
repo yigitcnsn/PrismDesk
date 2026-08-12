@@ -1,19 +1,30 @@
-"""Publish annotated JPEG + telemetry to home-hub PrismDesk debug module."""
+"""Publish annotated JPEG + telemetry to home-hub PrismDesk debug module.
+
+Supports multi-layer debug feeds:
+  raw | mat | hands | object | final
+
+Desk POSTs each enabled layer as JPEG, then POSTs state JSON.
+Backward compatible: publish(frame, state) still posts as layer \"final\"
+and also to legacy /api/prismdesk/frame.
+"""
 
 from __future__ import annotations
 
 import json
 import urllib.error
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Mapping, Optional
+from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 import cv2
 import numpy as np
 import yaml
 
 MAX_FRAME_BYTES = 800 * 1024
+
+# Layer ids used by home-hub multi-panel debug UI.
+LAYER_IDS: tuple[str, ...] = ("raw", "mat", "hands", "object", "final")
 
 
 @dataclass
@@ -27,6 +38,8 @@ class HomeHubConfig:
     timeout_sec: float = 1.5
     # Max long edge for debug JPEG (keeps under 800 KB on Pi)
     max_dim: int = 960
+    # Which layer JPEGs to publish (subset of LAYER_IDS)
+    layers: List[str] = field(default_factory=lambda: list(LAYER_IDS))
 
 
 @dataclass
@@ -46,6 +59,23 @@ class OverlayFlags:
         return out
 
 
+def _normalize_layers(raw: Any) -> List[str]:
+    if raw is None:
+        return list(LAYER_IDS)
+    if isinstance(raw, str):
+        items = [raw]
+    elif isinstance(raw, Sequence) and not isinstance(raw, (bytes, bytearray)):
+        items = list(raw)
+    else:
+        return list(LAYER_IDS)
+    out: List[str] = []
+    for item in items:
+        name = str(item).strip().lower()
+        if name in LAYER_IDS and name not in out:
+            out.append(name)
+    return out or list(LAYER_IDS)
+
+
 def load_home_hub_config(path: str | Path) -> HomeHubConfig:
     path = Path(path)
     if not path.is_file():
@@ -61,6 +91,7 @@ def load_home_hub_config(path: str | Path) -> HomeHubConfig:
         max_bytes=min(MAX_FRAME_BYTES, int(raw.get("max_bytes", MAX_FRAME_BYTES))),
         timeout_sec=float(raw.get("timeout_sec", 1.5)),
         max_dim=int(raw.get("max_dim", 960)),
+        layers=_normalize_layers(raw.get("layers")),
     )
 
 
@@ -81,7 +112,7 @@ def overlays_from_config_payload(payload: Mapping[str, Any] | None) -> OverlayFl
 
 
 class HomeHubPublisher:
-    """POST latest annotated JPEG + state; poll overlay config."""
+    """POST layer JPEGs + state; poll overlay config."""
 
     def __init__(self, config: Optional[HomeHubConfig] = None) -> None:
         self.config = config or HomeHubConfig()
@@ -92,6 +123,10 @@ class HomeHubPublisher:
     @property
     def enabled(self) -> bool:
         return bool(self.config.enabled)
+
+    @property
+    def enabled_layers(self) -> List[str]:
+        return _normalize_layers(self.config.layers)
 
     def fetch_config(self) -> OverlayFlags:
         url = f"{self.config.base_url}/api/prismdesk/config"
@@ -104,29 +139,65 @@ class HomeHubPublisher:
         return self.overlays
 
     def publish(self, frame_bgr: np.ndarray, state: Dict[str, Any]) -> bool:
-        """Encode frame as JPEG and POST frame + state. Returns True on success."""
+        """Backward-compatible: publish a single frame as the final layer."""
+        return self.publish_layers({"final": frame_bgr}, state)
+
+    def publish_layers(
+        self,
+        layers: Mapping[str, np.ndarray],
+        state: Dict[str, Any],
+    ) -> bool:
+        """Encode and POST each enabled layer JPEG, then POST state."""
         if not self.enabled:
             return False
-        jpeg = encode_jpeg_capped(
-            frame_bgr,
-            quality=self.config.jpeg_quality,
-            max_bytes=self.config.max_bytes,
-            max_dim=self.config.max_dim,
-        )
-        if jpeg is None:
-            self._note_fail(RuntimeError("JPEG encode failed / over size cap"))
-            return False
+
+        enabled = set(self.enabled_layers)
+        posted: List[str] = []
         try:
-            self._post_bytes(
-                f"{self.config.base_url}/api/prismdesk/frame",
-                jpeg,
-                content_type="image/jpeg",
-            )
+            for name, frame in layers.items():
+                layer = str(name).strip().lower()
+                if layer not in LAYER_IDS or layer not in enabled:
+                    continue
+                if frame is None or not isinstance(frame, np.ndarray) or frame.size == 0:
+                    continue
+                jpeg = encode_jpeg_capped(
+                    frame,
+                    quality=self.config.jpeg_quality,
+                    max_bytes=self.config.max_bytes,
+                    max_dim=self.config.max_dim,
+                )
+                if jpeg is None:
+                    self._note_fail(RuntimeError(f"JPEG encode failed for layer={layer}"))
+                    continue
+                # New multi-layer path (404 = older hub without layer routes)
+                try:
+                    self._post_bytes(
+                        f"{self.config.base_url}/api/prismdesk/frame/{layer}",
+                        jpeg,
+                        content_type="image/jpeg",
+                    )
+                    posted.append(layer)
+                except RuntimeError as exc:
+                    if "404" not in str(exc):
+                        raise
+                    if layer != "final":
+                        continue
+                # Legacy alias: final also goes to /api/prismdesk/frame
+                if layer == "final":
+                    self._post_bytes(
+                        f"{self.config.base_url}/api/prismdesk/frame",
+                        jpeg,
+                        content_type="image/jpeg",
+                    )
+                    if "final" not in posted:
+                        posted.append("final")
+
             payload = dict(state)
             payload.setdefault("overlays", self.overlays.as_list())
+            payload["layers"] = posted
             self._post_json(f"{self.config.base_url}/api/prismdesk/state", payload)
             self._fail_streak = 0
-            return True
+            return bool(posted)
         except Exception as exc:  # noqa: BLE001
             self._note_fail(exc)
             return False

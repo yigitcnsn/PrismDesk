@@ -1001,18 +1001,65 @@ def cmd_desk(args: argparse.Namespace) -> int:
                     hub.fetch_config()
                     overlays = hub.overlays
                 if (frames - 1) % hub_cfg.publish_every == 0:
-                    debug = draw_debug_camera(
-                        frame,
-                        hands=hands,
-                        mat_corners=mat_corners,
-                        mat_config=mat_config,
-                        fps_live=fps_live,
-                        track_fps=track_fps,
-                        mat_ok=mat_corners is not None,
-                        analysis=analysis if do_object else None,
-                        measure_config=measure_config,
-                        overlays=overlays,
-                    )
+                    from src.core.home_hub import OverlayFlags
+
+                    flags = overlays or OverlayFlags()
+                    layers = {}
+                    want = set(hub.enabled_layers)
+                    if "raw" in want:
+                        layers["raw"] = frame
+                    if "mat" in want:
+                        layers["mat"] = draw_debug_camera(
+                            frame,
+                            hands=[],
+                            mat_corners=mat_corners,
+                            mat_config=mat_config,
+                            fps_live=fps_live,
+                            track_fps=track_fps,
+                            mat_ok=mat_corners is not None,
+                            analysis=None,
+                            measure_config=measure_config,
+                            overlays=OverlayFlags(mat=True, object=False, hands=False),
+                        )
+                    if "hands" in want:
+                        layers["hands"] = draw_debug_camera(
+                            frame,
+                            hands=hands,
+                            mat_corners=None,
+                            mat_config=mat_config,
+                            fps_live=fps_live,
+                            track_fps=track_fps,
+                            mat_ok=False,
+                            analysis=None,
+                            measure_config=measure_config,
+                            overlays=OverlayFlags(mat=False, object=False, hands=True),
+                        )
+                    if "object" in want:
+                        layers["object"] = draw_debug_camera(
+                            frame,
+                            hands=[],
+                            mat_corners=mat_corners,
+                            mat_config=mat_config,
+                            fps_live=fps_live,
+                            track_fps=track_fps,
+                            mat_ok=mat_corners is not None,
+                            analysis=analysis if do_object else None,
+                            measure_config=measure_config,
+                            overlays=OverlayFlags(mat=False, object=True, hands=False),
+                        )
+                    if "final" in want:
+                        layers["final"] = draw_debug_camera(
+                            frame,
+                            hands=hands,
+                            mat_corners=mat_corners,
+                            mat_config=mat_config,
+                            fps_live=fps_live,
+                            track_fps=track_fps,
+                            mat_ok=mat_corners is not None,
+                            analysis=analysis if do_object else None,
+                            measure_config=measure_config,
+                            overlays=flags,
+                        )
                     state = {
                         "fps": round(fps_live, 2),
                         "track_fps": round(track_fps, 2),
@@ -1025,8 +1072,9 @@ def cmd_desk(args: argparse.Namespace) -> int:
                         ),
                         "capture": f"{frame.shape[1]}x{frame.shape[0]}",
                         "overlays": hub.overlays.as_list(),
+                        "rotate": int(getattr(cfg, "rotate_degrees", 0) or 0),
                     }
-                    hub.publish(debug, state)
+                    hub.publish_layers(layers, state)
     except KeyboardInterrupt:
         print("\nInterrupted")
     finally:
