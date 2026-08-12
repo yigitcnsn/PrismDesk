@@ -18,11 +18,14 @@ import subprocess
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import TYPE_CHECKING, List, Optional, Tuple
 
 import cv2
 import numpy as np
 import yaml
+
+if TYPE_CHECKING:
+    from .homography import CamProjectorHomography
 
 
 @dataclass
@@ -35,6 +38,8 @@ class ProjectorConfig:
     apply_mode: bool = True
     # If discovery tools missing, still open fullscreen (HY300 as primary HDMI)
     allow_fullscreen_fallback: bool = True
+    # Optional cam→proj plane map from `calibrate-projector`
+    homography: Optional["CamProjectorHomography"] = None
 
 
 @dataclass
@@ -52,6 +57,8 @@ class OutputInfo:
 
 
 def load_projector_config(path: str | Path) -> ProjectorConfig:
+    from .homography import homography_from_dict
+
     path = Path(path)
     if not path.is_file():
         return ProjectorConfig()
@@ -65,10 +72,13 @@ def load_projector_config(path: str | Path) -> ProjectorConfig:
         window_name=str(raw.get("window_name", "prismdesk-projector")),
         apply_mode=bool(raw.get("apply_mode", True)),
         allow_fullscreen_fallback=bool(raw.get("allow_fullscreen_fallback", True)),
+        homography=homography_from_dict(raw.get("homography")),
     )
 
 
 def save_projector_config(path: str | Path, cfg: ProjectorConfig) -> None:
+    from .homography import homography_to_dict
+
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
@@ -80,6 +90,8 @@ def save_projector_config(path: str | Path, cfg: ProjectorConfig) -> None:
         "apply_mode": cfg.apply_mode,
         "allow_fullscreen_fallback": cfg.allow_fullscreen_fallback,
     }
+    if cfg.homography is not None:
+        payload["homography"] = homography_to_dict(cfg.homography)
     with path.open("w", encoding="utf-8") as f:
         yaml.safe_dump(payload, f, default_flow_style=False, sort_keys=False)
 

@@ -14,6 +14,8 @@ from typing import List, Optional, Tuple
 import cv2
 import numpy as np
 
+from .homography import CamProjectorHomography, map_cam_to_hud
+
 Point = Tuple[float, float]
 
 # Classic 21-point hand skeleton (MediaPipe Hands).
@@ -189,18 +191,20 @@ class HandTracker:
         hands: List[HandResult],
         *,
         src_size: Optional[Tuple[int, int]] = None,
+        homography: Optional[CamProjectorHomography] = None,
     ) -> np.ndarray:
         """Draw bright hand skeleton on a dark projector canvas.
 
-        Landmarks are mapped with a simple stretch from the camera frame to the
-        canvas (cam↔projector homography comes later). Prefer normalized coords.
+        Uses cam↔projector homography when provided; otherwise stretch / norm mapping.
         """
         h, w = canvas_bgr.shape[:2]
         bone = (0, 255, 255)
         joint = (255, 0, 255)
         tip_color = (0, 255, 0)
         for hand in hands:
-            pts = _landmarks_to_canvas(hand, w, h, src_size)
+            pts = _landmarks_to_canvas(
+                hand, w, h, src_size, homography=homography
+            )
             if not pts:
                 continue
             for a, b in HAND_CONNECTIONS:
@@ -231,7 +235,25 @@ def _landmarks_to_canvas(
     canvas_w: int,
     canvas_h: int,
     src_size: Optional[Tuple[int, int]],
+    *,
+    homography: Optional[CamProjectorHomography] = None,
 ) -> List[Tuple[int, int]]:
+    if homography is not None:
+        if src_size is None or src_size[0] <= 0 or src_size[1] <= 0:
+            return []
+        sw, sh = src_size
+        if hand.landmarks_px:
+            pts = hand.landmarks_px
+        elif hand.landmarks_norm:
+            pts = [(x * sw, y * sh) for x, y in hand.landmarks_norm]
+        else:
+            return []
+        return map_cam_to_hud(
+            pts,
+            src_size=src_size,
+            hud_size=(canvas_w, canvas_h),
+            homography=homography,
+        )
     if hand.landmarks_norm:
         return [
             (int(x * canvas_w), int(y * canvas_h)) for x, y in hand.landmarks_norm

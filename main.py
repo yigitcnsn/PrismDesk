@@ -2,14 +2,15 @@
 PrismDesk entry point.
 
 Modes:
-  measure           Photo edge measurement (existing)
-  calibrate-camera  Chessboard fisheye/pinhole calibration for USB cam
-  hands             Live hand tracking (optional --project HUD on HY300)
-  idle              Cheap projector HUD: top-left time only (no camera)
-  debug             Local GUI: camera or examples/ images, test idle/hands/desk
-  desk              Mat find + object measure + hands + projector HUD
-  projector-list    List Wayland outputs via wlr-randr
-  projector-test    Fullscreen alignment pattern on HY300 (HDMI-A-1)
+  measure               Photo edge measurement (existing)
+  calibrate-camera      Chessboard fisheye/pinhole calibration for USB cam
+  calibrate-projector   Projected chessboard → cam↔projector homography
+  hands                 Live hand tracking (optional --project HUD on HY300)
+  idle                  Cheap projector HUD: top-left time only (no camera)
+  debug                 Local GUI: camera or examples/ images, test idle/hands/desk
+  desk                  Mat find + object measure + hands + projector HUD
+  projector-list        List Wayland outputs via wlr-randr
+  projector-test        Fullscreen alignment pattern on HY300 (HDMI-A-1)
 """
 
 from __future__ import annotations
@@ -61,6 +62,58 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("fisheye", "pinhole"),
         default=None,
         help="Override distortion model",
+    )
+
+    calib_proj = sub.add_parser(
+        "calibrate-projector",
+        help="Projected chessboard → camera↔projector homography",
+    )
+    calib_proj.add_argument(
+        "--camera-config",
+        type=Path,
+        default=DEFAULT_CAMERA_CONFIG,
+        help="Camera YAML (undistort if calibrated)",
+    )
+    calib_proj.add_argument(
+        "--projector-config",
+        type=Path,
+        default=DEFAULT_PROJECTOR_CONFIG,
+        help="Input/output projector YAML (default: config/projector.yaml)",
+    )
+    calib_proj.add_argument("--device", type=int, default=None, help="Force V4L2 index")
+    calib_proj.add_argument(
+        "--board",
+        default="9x6",
+        help="Inner corners WxH (default 9x6)",
+    )
+    calib_proj.add_argument(
+        "--output",
+        default=None,
+        help="Override projector output name (e.g. HDMI-A-1)",
+    )
+    calib_proj.add_argument(
+        "--show",
+        choices=("auto", "mpv", "opencv"),
+        default="mpv",
+        help="How to show the projected pattern (default: mpv)",
+    )
+    calib_proj.add_argument(
+        "--no-preview",
+        action="store_true",
+        help="Do not open local OpenCV camera preview",
+    )
+    calib_proj.add_argument("--no-undistort", action="store_true")
+    calib_proj.add_argument(
+        "--capture",
+        default=None,
+        help="Optional camera capture WxH (match desk/hands capture for best H)",
+    )
+    calib_proj.add_argument(
+        "--rotate",
+        type=int,
+        default=None,
+        choices=(0, 90, 180, 270),
+        help="Override camera rotate_degrees for this run",
     )
 
     hands = sub.add_parser(
@@ -448,6 +501,47 @@ def cmd_calibrate_camera(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_calibrate_projector(args: argparse.Namespace) -> int:
+    from src.vision.calibrate_projector import run_projector_homography_calibration
+    from src.vision.homography import parse_board_size
+
+    cam_cfg = _load_or_bootstrap_camera_config(args.camera_config)
+    if args.device is not None:
+        cam_cfg.device_indices = [args.device] + [
+            i for i in cam_cfg.device_indices if i != args.device
+        ]
+    if getattr(args, "rotate", None) is not None:
+        cam_cfg.rotate_degrees = int(args.rotate)
+    if args.capture:
+        try:
+            size = _parse_size(args.capture, allow_full=True)
+        except ValueError as exc:
+            print(exc)
+            return 1
+        if size is not None:
+            cam_cfg.width, cam_cfg.height = size
+
+    proj_cfg = _load_or_bootstrap_projector_config(args.projector_config)
+    if args.output:
+        proj_cfg.output_name = args.output
+
+    # Always write to the requested projector config path (create if missing).
+    out_path = args.projector_config
+    if not out_path.is_file() and EXAMPLE_PROJECTOR_CONFIG.is_file():
+        print(f"{out_path} missing — will create after successful calib")
+
+    run_projector_homography_calibration(
+        cam_cfg,
+        proj_cfg,
+        output_path=out_path,
+        board_size=parse_board_size(args.board),
+        show=str(args.show),
+        preview=not bool(args.no_preview),
+        no_undistort=bool(args.no_undistort),
+    )
+    return 0
+
+
 def _parse_size(text: str | None, *, allow_full: bool = True) -> tuple[int, int] | None:
     """Parse '1920x1080' or 'full' / '0x0' → None (native)."""
     if text is None:
@@ -583,7 +677,16 @@ def cmd_hands(args: argparse.Namespace) -> int:
                 tracker.close()
                 cam.close()
                 return 1
-        print("HUD uses stretch mapping (cam↔projector homography later). Ctrl+C or q quit")
+        print(
+            "HUD mapping: "
+            + (
+                f"homography (reproj≈{proj_cfg.homography.reprojection_error_px:.1f}px)"
+                if proj_cfg.homography is not None
+                and proj_cfg.homography.reprojection_error_px is not None
+                else ("homography" if proj_cfg.homography is not None else "stretch (run calibrate-projector)")
+            )
+            + ". Ctrl+C or q quit"
+        )
     else:
         print("q quit")
 
@@ -592,6 +695,7 @@ def cmd_hands(args: argparse.Namespace) -> int:
     t0 = time.time()
     hud = None
     hands = []
+    cam_proj_h = proj_cfg.homography if project and proj_cfg is not None else None
     try:
         while True:
             frame = cam.read()
@@ -610,7 +714,12 @@ def cmd_hands(args: argparse.Namespace) -> int:
                     hud = np.zeros((hud_h, hud_w, 3), dtype=np.uint8)
                 else:
                     hud[:] = 0
-                tracker.draw_hud(hud, hands, src_size=(frame.shape[1], frame.shape[0]))
+                tracker.draw_hud(
+                    hud,
+                    hands,
+                    src_size=(frame.shape[1], frame.shape[0]),
+                    homography=cam_proj_h,
+                )
                 cv2.putText(
                     hud,
                     f"fps={fps_live:.1f}  track={track_fps:.1f}Hz/{track_every}  "
@@ -855,6 +964,17 @@ def cmd_desk(args: argparse.Namespace) -> int:
         f"Projector: {info.name} {info.width}x{info.height}@{info.refresh_hz:.3f}Hz "
         f"hud={hud_w}x{hud_h} source={info.source}"
     )
+    cam_proj_h = proj_cfg.homography
+    if cam_proj_h is not None:
+        err = cam_proj_h.reprojection_error_px
+        err_s = f" reproj≈{err:.1f}px" if err is not None else ""
+        print(
+            f"HUD mapping: homography{err_s} "
+            f"(calib cam {cam_proj_h.cam_size[0]}x{cam_proj_h.cam_size[1]} → "
+            f"proj {cam_proj_h.proj_size[0]}x{cam_proj_h.proj_size[1]})"
+        )
+    else:
+        print("HUD mapping: stretch — run `python main.py calibrate-projector`")
 
     cam = Camera(cfg)
     tracker = HandTracker(infer_size=track_size)
@@ -985,6 +1105,7 @@ def cmd_desk(args: argparse.Namespace) -> int:
                 analysis=analysis if do_object else None,
                 measure_config=measure_config,
                 overlays=overlays,
+                homography=cam_proj_h,
             )
             if mpv is not None:
                 mpv.show(hud)
@@ -1225,6 +1346,7 @@ def main() -> int:
         known = {
             "measure",
             "calibrate-camera",
+            "calibrate-projector",
             "hands",
             "idle",
             "debug",
@@ -1241,6 +1363,8 @@ def main() -> int:
         return cmd_measure(args)
     if args.command == "calibrate-camera":
         return cmd_calibrate_camera(args)
+    if args.command == "calibrate-projector":
+        return cmd_calibrate_projector(args)
     if args.command == "hands":
         return cmd_hands(args)
     if args.command == "idle":

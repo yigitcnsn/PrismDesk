@@ -16,3 +16,11 @@ window_name: prismdesk-projector
 apply_mode: true
 # If discovery tools missing, still open fullscreen at (0,0)
 allow_fullscreen_fallback: true
+
+# Filled by `python main.py calibrate-projector` (projected chessboard).
+# Maps camera pixels → this canvas (width x height). Omit / delete to use stretch.
+# homography:
+#   cam_to_proj: [[...],[...],[...]]
+#   cam_size: [960, 540]
+#   proj_size: [1920, 1080]
+#   reprojection_error_px: 1.2

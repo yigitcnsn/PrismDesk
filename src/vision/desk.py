@@ -13,6 +13,7 @@ from src.measure.mat import MatConfig, order_corners
 from src.measure.perspective import image_points_to_mat_cm, mat_plane_points_to_image
 from src.measure.shape import ObjectAnalysis
 from src.vision.hands import HAND_CONNECTIONS, HandResult
+from src.vision.homography import CamProjectorHomography, map_cam_to_hud
 
 Point = Tuple[float, float]
 
@@ -52,10 +53,15 @@ def _to_hud(
     src_h: int,
     hud_w: int,
     hud_h: int,
+    homography: Optional[CamProjectorHomography] = None,
 ) -> Tuple[int, int]:
-    if src_w <= 0 or src_h <= 0:
-        return int(x), int(y)
-    return int(x * hud_w / src_w), int(y * hud_h / src_h)
+    mapped = map_cam_to_hud(
+        [(x, y)],
+        src_size=(src_w, src_h),
+        hud_size=(hud_w, hud_h),
+        homography=homography,
+    )
+    return mapped[0]
 
 
 def _draw_mat(
@@ -63,11 +69,15 @@ def _draw_mat(
     mat_corners: np.ndarray,
     mat_config: MatConfig,
     src_size: Tuple[int, int],
+    homography: Optional[CamProjectorHomography] = None,
 ) -> None:
     hud_h, hud_w = canvas.shape[:2]
     src_w, src_h = src_size
     ordered = order_corners(mat_corners)
-    pts = [_to_hud(float(x), float(y), src_w, src_h, hud_w, hud_h) for x, y in ordered]
+    pts = [
+        _to_hud(float(x), float(y), src_w, src_h, hud_w, hud_h, homography)
+        for x, y in ordered
+    ]
     for i in range(4):
         cv2.line(canvas, pts[i], pts[(i + 1) % 4], (0, 255, 255), 2, cv2.LINE_AA)
     for p in pts:
@@ -90,6 +100,7 @@ def _draw_object(
     mat_corners: np.ndarray,
     measure_cfg: MatConfig,
     src_size: Tuple[int, int],
+    homography: Optional[CamProjectorHomography] = None,
 ) -> None:
     if not analysis.outline_points:
         return
@@ -101,7 +112,9 @@ def _draw_object(
         )
     except Exception:
         return
-    hud_obj = [_to_hud(x, y, src_w, src_h, hud_w, hud_h) for x, y in cam_pts]
+    hud_obj = [
+        _to_hud(x, y, src_w, src_h, hud_w, hud_h, homography) for x, y in cam_pts
+    ]
     if len(hud_obj) >= 2:
         for i in range(len(hud_obj)):
             cv2.line(
@@ -148,13 +161,17 @@ def _draw_hands(
     mat_corners: Optional[np.ndarray],
     mat_config: MatConfig,
     src_size: Tuple[int, int],
+    homography: Optional[CamProjectorHomography] = None,
 ) -> None:
     src_w, src_h = src_size
     bone = (0, 255, 255)
     joint = (255, 0, 255)
     tip_color = (0, 255, 0)
     for hand in hands:
-        hud_pts = [_to_hud(x, y, src_w, src_h, canvas.shape[1], canvas.shape[0]) for x, y in hand.landmarks_px]
+        hud_pts = [
+            _to_hud(x, y, src_w, src_h, canvas.shape[1], canvas.shape[0], homography)
+            for x, y in hand.landmarks_px
+        ]
         for a, b in HAND_CONNECTIONS:
             if a < len(hud_pts) and b < len(hud_pts):
                 cv2.line(canvas, hud_pts[a], hud_pts[b], bone, 2, cv2.LINE_AA)
@@ -223,23 +240,30 @@ def draw_desk_hud(
     analysis: Optional[ObjectAnalysis] = None,
     measure_config: Optional[MatConfig] = None,
     overlays: Optional[OverlayFlags] = None,
+    homography: Optional[CamProjectorHomography] = None,
 ) -> np.ndarray:
     """Dark projector HUD: mat, object outline+cm, hand skeleton.
 
     Measure/work mode replaces idle entirely — do not composite the idle clock here.
+    When ``homography`` is set, overlays lock to the desk via cam↔projector H;
+    otherwise stretch mapping is used.
     """
     flags = overlays or OverlayFlags()
     canvas_bgr[:] = 0
     measure_cfg = measure_config or mat_config
 
     if flags.mat and mat_corners is not None:
-        _draw_mat(canvas_bgr, mat_corners, mat_config, src_size)
+        _draw_mat(canvas_bgr, mat_corners, mat_config, src_size, homography)
 
     if flags.object and analysis is not None and mat_corners is not None:
-        _draw_object(canvas_bgr, analysis, mat_corners, measure_cfg, src_size)
+        _draw_object(
+            canvas_bgr, analysis, mat_corners, measure_cfg, src_size, homography
+        )
 
     if flags.hands:
-        _draw_hands(canvas_bgr, hands, mat_corners, mat_config, src_size)
+        _draw_hands(
+            canvas_bgr, hands, mat_corners, mat_config, src_size, homography
+        )
 
     status = "mat:lock" if mat_ok else "mat:--"
     obj = "obj:yes" if analysis is not None else "obj:--"

@@ -12,13 +12,14 @@ Spatial AR workbench for Raspberry Pi 5: overhead camera + HY300 projector turn 
 |------|---------|--------|
 | Photo measure | `python main.py measure PHOTO` | Detect 40×30 cm mat → warp → silhouette → cm |
 | Camera calib | `python main.py calibrate-camera` | Chessboard → `config/camera.yaml` |
+| Projector calib | `python main.py calibrate-projector` | Projected chessboard → cam↔proj H in `config/projector.yaml` |
 | Hands | `python main.py hands [--project]` | MediaPipe Tasks HandLandmarker → optional HUD |
 | Desk (all-in-one) | `python main.py desk` | Mat + object measure + hands → projector HUD |
 | Desk → home-hub | `python main.py desk --home-hub` | Annotated camera JPEG + state to hub debug UI |
 | Projector list | `python main.py projector-list` | DRM / wlr-randr / xrandr discovery |
 | Projector test | `python main.py projector-test` | Fullscreen alignment pattern |
 
-Live HUD uses **ffplay/mpv** (pip OpenCV Qt/xcb often aborts on Pi). Mapping camera → projector is still **stretch**; true cam↔projector homography is next.
+Live HUD uses **ffplay/mpv** (pip OpenCV Qt/xcb often aborts on Pi). After `calibrate-projector`, overlays use the saved cam↔projector homography; otherwise stretch.
 
 ---
 
@@ -120,6 +121,17 @@ python main.py projector-list
 python main.py projector-test
 ```
 
+### Camera ↔ projector homography
+
+Assumes the full projector canvas is visible in the overhead camera. Projects a chessboard, detects it in the camera, saves `homography` into `config/projector.yaml`.
+
+```bash
+# Prefer same capture size + rotate you use for desk
+python main.py calibrate-projector --capture 960x540
+# SPACE when corners lock  |  c save  |  q quit
+python main.py desk
+```
+
 ### Hands on projector
 
 ```bash
@@ -156,10 +168,10 @@ MediaPipe model downloads once to `models/hand_landmarker.task` on first run.
 - [x] MediaPipe Hands (Tasks API) + projector HUD via ffplay/mpv
 - [x] Live `desk` mode: mat + object measure + hands
 - [x] home-hub PrismDesk debug publisher (`--home-hub`)
+- [x] Camera ↔ projector homography (projected chessboard)
 
 ### Next
 
-- [ ] Camera ↔ projector homography (replace stretch mapping)
 - [ ] Higher live FPS (threading / lighter capture)
 - [ ] Final overhead mount (Cam 3 Wide + HY300)
 - [ ] Gesture widgets (hover / pinch / buttons)
