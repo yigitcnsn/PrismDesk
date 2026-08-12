@@ -267,6 +267,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="Disable live object measurement",
     )
     desk.add_argument(
+        "--blank-measure",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Blank projector before mat/object capture to stop HUD feedback (default on)",
+    )
+    desk.add_argument(
+        "--blank-settle",
+        type=float,
+        default=0.08,
+        help="Seconds to wait after blank before reading a measure frame (default 0.08)",
+    )
+    desk.add_argument(
+        "--blank-flush",
+        type=int,
+        default=2,
+        help="Camera frames to discard after blank (stale HUD still in pipe; default 2)",
+    )
+    desk.add_argument(
         "--measure-px-per-cm",
         type=float,
         default=20.0,
@@ -1002,10 +1020,14 @@ def cmd_desk(args: argparse.Namespace) -> int:
         if tracker.infer_size
         else f"{w}x{h}"
     )
+    blank_measure = bool(args.blank_measure)
+    blank_settle = max(0.0, float(args.blank_settle))
+    blank_flush = max(1, int(args.blank_flush))
     print(
         f"Desk: camera={idx} {w}x{h}@{fps:.1f} track={track_label} "
         f"every={track_every} mat_every={mat_every} object_every={object_every} "
         f"measure_ppc={measure_ppc:.0f} object={'on' if do_object else 'off'} "
+        f"blank_measure={'on' if blank_measure else 'off'} "
         f"mat={mat_config.width_cm:.0f}x{mat_config.height_cm:.0f}cm "
         f"rotate={int(cfg.rotate_degrees)} "
         f"undistort={'on' if und.enabled else 'off'}"
@@ -1079,18 +1101,46 @@ def cmd_desk(args: argparse.Namespace) -> int:
             if und.enabled and not args.no_undistort:
                 frame = und.apply(frame)
             frames += 1
-            if (frames - 1) % track_every == 0:
-                hands = tracker.process(frame)
-                track_frames += 1
-            if (frames - 1) % mat_every == 0:
-                found = detect_mat_corners(frame, mat_config)
-                if found is not None:
-                    mat_corners = found
-            if (
+
+            do_mat = (frames - 1) % mat_every == 0
+            do_obj = (
                 do_object
                 and mat_corners is not None
                 and (frames - 1) % object_every == 0
-            ):
+            )
+            # Projector light on the object is seen as silhouette growth — blank
+            # the HUD, settle, then capture a clean frame for mat/object measure.
+            if blank_measure and (do_mat or do_obj):
+                hud[:] = 0
+                if mpv is not None:
+                    mpv.show(hud)
+                    if not mpv.alive:
+                        print("video sink closed — exiting")
+                        break
+                else:
+                    surface.show(hud)
+                if blank_settle > 0:
+                    time.sleep(blank_settle)
+                for _ in range(blank_flush):
+                    try:
+                        frame = cam.read()
+                    except RuntimeError as exc:
+                        print(f"camera read failed during blank measure: {exc}", flush=True)
+                        frame = None
+                        break
+                    if und.enabled and not args.no_undistort:
+                        frame = und.apply(frame)
+                if frame is None:
+                    continue
+
+            if (frames - 1) % track_every == 0:
+                hands = tracker.process(frame)
+                track_frames += 1
+            if do_mat:
+                found = detect_mat_corners(frame, mat_config)
+                if found is not None:
+                    mat_corners = found
+            if do_obj and mat_corners is not None:
                 try:
                     warped, _ = warp_to_mat_plane(frame, mat_corners, measure_config)
                     analysis = analyze_object(warped, measure_config)
