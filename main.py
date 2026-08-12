@@ -907,7 +907,32 @@ def cmd_desk(args: argparse.Namespace) -> int:
     last_metrics = ""
     try:
         while True:
-            frame = cam.read()
+            try:
+                frame = cam.read()
+            except RuntimeError as exc:
+                print(f"camera read failed (will retry): {exc}", flush=True)
+                cv2.putText(
+                    hud,
+                    "camera reconnecting…",
+                    (24, 64),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    1.0,
+                    (0, 140, 255),
+                    2,
+                    cv2.LINE_AA,
+                )
+                if mpv is not None:
+                    try:
+                        mpv.show(hud)
+                    except Exception:
+                        pass
+                else:
+                    try:
+                        surface.show(hud)
+                    except Exception:
+                        pass
+                time.sleep(1.0)
+                continue
             if und.enabled and not args.no_undistort:
                 frame = und.apply(frame)
             frames += 1
