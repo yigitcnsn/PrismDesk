@@ -9,7 +9,7 @@ Modes:
   idle                  Cheap projector HUD: top-left time only (no camera)
   debug                 Local GUI: camera or examples/ images, test idle/hands/desk
   desk                  Mat find + object measure + hands + projector HUD
-  projector-list        List Wayland outputs via wlr-randr
+  projector-list        List outputs (wlr-randr / xrandr / DRM)
   projector-test        Fullscreen alignment pattern on HY300 (HDMI-A-1)
 """
 
@@ -159,7 +159,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--show",
         choices=("auto", "mpv", "opencv"),
         default="auto",
-        help="Projector sink when --project (default: auto → mpv then OpenCV)",
+        help="Projector sink when --project (default: auto → ffplay/mpv)",
     )
     hands.add_argument(
         "--preview",
@@ -379,7 +379,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Where s saves frames (default: debug_dumps/)",
     )
 
-    sub.add_parser("projector-list", help="List Wayland outputs (wlr-randr)")
+    sub.add_parser("projector-list", help="List outputs (wlr-randr, xrandr, or DRM)")
 
     proj = sub.add_parser("projector-test", help="Fullscreen test pattern on HY300")
     proj.add_argument(
