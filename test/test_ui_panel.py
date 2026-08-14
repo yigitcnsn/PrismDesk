@@ -2,15 +2,12 @@
 
 from __future__ import annotations
 
-import time
 import unittest
-
-import numpy as np
 
 from src.core.home_hub import OverlayFlags, overlay_config_payload
 from src.ui.control_panel import ControlPanel
 from src.ui.pinch import PinchTracker, _normalized_pinch_gap
-from src.ui.widgets import Button, Toggle, point_in_rect
+from src.ui.widgets import Button, point_in_rect
 from src.vision.hands import HandResult
 
 
