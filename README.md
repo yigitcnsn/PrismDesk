@@ -49,7 +49,8 @@ Live HUD uses **ffplay/mpv** (pip OpenCV Qt/xcb often aborts on Pi). After `cali
          ├── Vision: MediaPipe + mat homography
          ├── Measure: silhouette → shape metrics (cm)
          ├── HUD: dark high-contrast overlay
-         └── Later: pi-llm, home-hub, voice
+         ├── home-hub debug bridge
+         └── Later: pi-llm, voice
 ```
 
 ---
@@ -62,10 +63,15 @@ PrismDesk/
 ├── config/
 │   ├── mat.yaml            # 40×30 cm mat + detect knobs
 │   ├── camera.example.yaml # copy → camera.yaml (gitignored)
-│   └── projector.example.yaml
+│   ├── projector.example.yaml
+│   ├── home_hub.example.yaml
+│   └── audio.example.yaml
 ├── src/
 │   ├── measure/            # Photo + mat-plane measurement
-│   └── vision/             # Camera, calib, hands, projector, desk HUD
+│   ├── vision/             # Camera, calib, hands, projector, desk HUD
+│   ├── core/               # home-hub publisher
+│   └── ui/                 # Pinch, widgets, control panel
+├── test/                   # Unit tests
 ├── models/                 # hand_landmarker.task (downloaded, gitignored)
 ├── requirements.txt
 └── README.md
@@ -167,13 +173,14 @@ MediaPipe model downloads once to `models/hand_landmarker.task` on first run.
 - [x] Live `desk` mode: mat + object measure + hands
 - [x] home-hub PrismDesk debug publisher (`--home-hub`)
 - [x] Camera ↔ projector homography (projected chessboard)
+- [x] Gesture widgets: pinch + control-panel toggles/buttons
 
 ### Next
 
 - [ ] Higher live FPS (threaded capture done; infer/display split next)
 - [ ] Final overhead mount (Cam 3 Wide + HY300)
-- [ ] Gesture widgets (hover / pinch / buttons)
-- [ ] `pi-llm` + `home-hub` bridges
+- [ ] Hover affordances / richer gesture widgets
+- [ ] `pi-llm` bridge
 - [ ] Wake-word, STT, TTS
 
 ---
