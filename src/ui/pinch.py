@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 import time
 from dataclasses import dataclass
-from typing import List, Optional, Sequence, Tuple
+from typing import Optional, Sequence, Tuple
 
 from src.vision.hands import HandResult
 from src.vision.homography import CamProjectorHomography, map_cam_to_hud
