@@ -28,5 +28,5 @@ object_min_area_ratio: 0.002
 object_max_area_ratio: 0.55
 # approxPolyDP epsilon as fraction of perimeter
 object_approx_epsilon: 0.02
-# Color-distance sensitivity floor (Lab MAD units * 10 scale knobs)
+# Color-distance sensitivity floor (divided by 8 before use as Lab distance threshold)
 object_v_min: 35
