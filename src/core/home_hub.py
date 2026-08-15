@@ -1,7 +1,7 @@
 """Publish annotated JPEG + telemetry to home-hub PrismDesk debug module.
 
 Supports multi-layer debug feeds:
-  raw | mat | hands | object | final
+  raw | mat | object | final
 
 Desk POSTs each enabled layer as JPEG, then POSTs state JSON.
 Backward compatible: publish(frame, state) still posts as layer \"final\"
@@ -26,7 +26,7 @@ import yaml
 MAX_FRAME_BYTES = 800 * 1024
 
 # Layer ids used by home-hub multi-panel debug UI.
-LAYER_IDS: tuple[str, ...] = ("raw", "mat", "hands", "object", "final")
+LAYER_IDS: tuple[str, ...] = ("raw", "mat", "object", "final")
 
 
 @dataclass
@@ -48,7 +48,6 @@ class HomeHubConfig:
 class OverlayFlags:
     mat: bool = True
     object: bool = True
-    hands: bool = True
 
     def as_list(self) -> list[str]:
         out = []
@@ -56,15 +55,12 @@ class OverlayFlags:
             out.append("mat")
         if self.object:
             out.append("object")
-        if self.hands:
-            out.append("hands")
         return out
 
     def as_dict(self) -> dict[str, bool]:
         return {
             "mat": bool(self.mat),
             "object": bool(self.object),
-            "hands": bool(self.hands),
         }
 
 
@@ -122,8 +118,6 @@ def _flags_from_mapping(raw: Any) -> OverlayFlags:
         flags.mat = bool(raw["mat"])
     if isinstance(raw.get("object"), bool):
         flags.object = bool(raw["object"])
-    if isinstance(raw.get("hands"), bool):
-        flags.hands = bool(raw["hands"])
     return flags
 
 
@@ -133,9 +127,9 @@ def split_overlays_from_config(
     """Parse projector vs browser overlay toggles from hub config.
 
     New shape:
-      { "projector": {mat,object,hands}, "browser": {mat,object,hands} }
+      { "projector": {mat,object}, "browser": {mat,object} }
     Legacy:
-      { "overlays": {mat,object,hands} }  → applied to BOTH surfaces
+      { "overlays": {mat,object} }  → applied to BOTH surfaces
     """
     if not payload:
         return OverlayFlags(), OverlayFlags()
@@ -146,9 +140,7 @@ def split_overlays_from_config(
 
     if proj_raw is None and browser_raw is None and legacy is not None:
         shared = _flags_from_mapping(legacy)
-        return shared, OverlayFlags(
-            mat=shared.mat, object=shared.object, hands=shared.hands
-        )
+        return shared, OverlayFlags(mat=shared.mat, object=shared.object)
 
     projector = _flags_from_mapping(proj_raw if proj_raw is not None else legacy)
     browser = _flags_from_mapping(browser_raw if browser_raw is not None else legacy)
@@ -218,11 +210,11 @@ class HomeHubPublisher:
         if not self.enabled:
             with self._lock:
                 self.projector_overlays = OverlayFlags(
-                    mat=flags.mat, object=flags.object, hands=flags.hands
+                    mat=flags.mat, object=flags.object
                 )
                 if mirror_browser:
                     self.browser_overlays = OverlayFlags(
-                        mat=flags.mat, object=flags.object, hands=flags.hands
+                        mat=flags.mat, object=flags.object
                     )
             return False
         browser = flags if mirror_browser else self.browser_overlays
@@ -235,11 +227,11 @@ class HomeHubPublisher:
         try:
             with self._lock:
                 self.projector_overlays = OverlayFlags(
-                    mat=flags.mat, object=flags.object, hands=flags.hands
+                    mat=flags.mat, object=flags.object
                 )
                 if mirror_browser:
                     self.browser_overlays = OverlayFlags(
-                        mat=flags.mat, object=flags.object, hands=flags.hands
+                        mat=flags.mat, object=flags.object
                     )
                 self._local_edit_until = time.monotonic() + max(0.0, float(hold_s))
                 self._put_json(url, payload)

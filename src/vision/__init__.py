@@ -1,4 +1,4 @@
-"""Live vision: USB camera, calibration, hand tracking, projector."""
+"""Live vision: USB camera, calibration, projector."""
 
 from .camera import Camera, CameraConfig, ThreadedCamera, load_camera_config, save_camera_config
 from .projector import (

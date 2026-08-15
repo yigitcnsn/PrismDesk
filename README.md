@@ -1,6 +1,6 @@
 # PrismDesk
 
-Spatial AR workbench for Raspberry Pi 5: overhead camera + HY300 projector turn a desk into a gesture-aware surface. Local AI / voice come later.
+Spatial AR workbench for Raspberry Pi 5: overhead camera + HY300 projector turn a desk into a measured surface. Local AI / voice come later.
 
 **Repo:** https://github.com/yigitcnsn/PrismDesk
 
@@ -13,7 +13,6 @@ Spatial AR workbench for Raspberry Pi 5: overhead camera + HY300 projector turn 
 | Photo measure | `python main.py measure PHOTO` | Detect 40×30 cm mat → warp → silhouette → cm |
 | Camera calib | `python main.py calibrate-camera` | Chessboard → `config/camera.yaml` |
 | Projector calib | `python main.py calibrate-projector` | Projected chessboard → cam↔proj H in `config/projector.yaml` |
-| Hands | `python main.py hands [--project]` | MediaPipe Tasks HandLandmarker → optional HUD |
 | Desk (all-in-one) | `python main.py desk` | Defaults: capture 960x540, rotate 180, home-hub on, threaded layers |
 | Desk → home-hub | `python main.py desk` | Same — hub on by default (`--no-home-hub` to disable) |
 | Projector list | `python main.py projector-list` | DRM / wlr-randr / xrandr discovery |
@@ -41,12 +40,12 @@ Live HUD uses **ffplay/mpv** (pip OpenCV Qt/xcb often aborts on Pi). After `cali
          ┌────────────────┴────────────────┐
          ▼                                 ▼
 [ Overhead camera ]                 [ HY300 projector ]
- (mat / hands / objects)             (spatial HUD)
+ (mat / objects)                     (spatial HUD)
          │                                 │
          └─────────────┬───────────────────┘
                        ▼
             [ PrismDesk core ]
-         ├── Vision: MediaPipe + mat homography
+         ├── Vision: mat detect + cam↔projector homography
          ├── Measure: silhouette → shape metrics (cm)
          ├── HUD: dark high-contrast overlay
          ├── home-hub debug bridge
@@ -64,15 +63,12 @@ PrismDesk/
 │   ├── mat.yaml            # 40×30 cm mat + detect knobs
 │   ├── camera.example.yaml # copy → camera.yaml (gitignored)
 │   ├── projector.example.yaml
-│   ├── home_hub.example.yaml
-│   └── audio.example.yaml
+│   └── home_hub.example.yaml
 ├── src/
 │   ├── measure/            # Photo + mat-plane measurement
-│   ├── vision/             # Camera, calib, hands, projector, desk HUD
-│   ├── core/               # home-hub publisher
-│   └── ui/                 # Pinch, widgets, control panel
+│   ├── vision/             # Camera, calib, projector, desk HUD
+│   └── core/               # home-hub publisher
 ├── test/                   # Unit tests
-├── models/                 # hand_landmarker.task (downloaded, gitignored)
 ├── requirements.txt
 └── README.md
 ```
@@ -140,25 +136,15 @@ python main.py calibrate-projector --capture 960x540 --rotate 180
 python main.py desk
 ```
 
-### Hands on projector
-
-```bash
-python main.py hands --project --capture 960x540 --track-size 480x270 --hud-size 640x360
-```
-
-### Desk: mat + object measure + hands
+### Desk: mat + object measure
 
 ```bash
 python main.py desk
 # baked defaults: --capture 960x540 --rotate 180 --home-hub
-# Pinch **Controls** (bottom-right) → Visual toggles sync to home-hub webpage
-# Sound section shows mic level (USB cam mic / default input; needs sounddevice)
 # --no-home-hub / --no-object / --rotate 0 if needed
 ```
 
-HUD shows FPS number only, plus mat/object/hands overlays. Vision + home-hub layers each run on their own thread.
-
-MediaPipe model downloads once to `models/hand_landmarker.task` on first run.
+HUD shows FPS number only, plus mat/object overlays. Vision + home-hub layers each run on their own thread.
 
 ---
 
@@ -169,17 +155,15 @@ MediaPipe model downloads once to `models/hand_landmarker.task` on first run.
 - [x] Repo layout, venv, public-safe `.gitignore`
 - [x] Photo mat detect → warp → object silhouette measure (cm)
 - [x] USB camera capture + fisheye/pinhole calibration path
-- [x] MediaPipe Hands (Tasks API) + projector HUD via ffplay/mpv
-- [x] Live `desk` mode: mat + object measure + hands
+- [x] Projector HUD via ffplay/mpv
+- [x] Live `desk` mode: mat + object measure
 - [x] home-hub PrismDesk debug publisher (`--home-hub`)
 - [x] Camera ↔ projector homography (projected chessboard)
-- [x] Gesture widgets: pinch + control-panel toggles/buttons
 
 ### Next
 
-- [ ] Higher live FPS (threaded capture done; infer/display split next)
+- [ ] Higher live FPS
 - [ ] Final overhead mount (Cam 3 Wide + HY300)
-- [ ] Hover affordances / richer gesture widgets
 - [ ] `pi-llm` bridge
 - [ ] Wake-word, STT, TTS
 

@@ -1,18 +1,17 @@
-"""Live desk HUD: mat outline + object measure + hands on the projector canvas."""
+"""Live desk HUD: mat outline + object measure on the projector canvas."""
 
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Optional, Sequence, Tuple
+from typing import Optional, Tuple
 
 import cv2
 import numpy as np
 
 from src.core.home_hub import OverlayFlags
 from src.measure.mat import MatConfig, order_corners
-from src.measure.perspective import image_points_to_mat_cm, mat_plane_points_to_image
+from src.measure.perspective import mat_plane_points_to_image
 from src.measure.shape import ObjectAnalysis
-from src.vision.hands import HAND_CONNECTIONS, HandResult
 from src.vision.homography import CamProjectorHomography, map_cam_to_hud
 
 Point = Tuple[float, float]
@@ -155,51 +154,6 @@ def _draw_object(
             )
 
 
-def _draw_hands(
-    canvas: np.ndarray,
-    hands: Sequence[HandResult],
-    mat_corners: Optional[np.ndarray],
-    mat_config: MatConfig,
-    src_size: Tuple[int, int],
-    homography: Optional[CamProjectorHomography] = None,
-) -> None:
-    src_w, src_h = src_size
-    bone = (0, 255, 255)
-    joint = (255, 0, 255)
-    tip_color = (0, 255, 0)
-    for hand in hands:
-        hud_pts = [
-            _to_hud(x, y, src_w, src_h, canvas.shape[1], canvas.shape[0], homography)
-            for x, y in hand.landmarks_px
-        ]
-        for a, b in HAND_CONNECTIONS:
-            if a < len(hud_pts) and b < len(hud_pts):
-                cv2.line(canvas, hud_pts[a], hud_pts[b], bone, 2, cv2.LINE_AA)
-        for p in hud_pts:
-            cv2.circle(canvas, p, 4, joint, -1, cv2.LINE_AA)
-        if not hud_pts:
-            continue
-        tip = hud_pts[8] if len(hud_pts) > 8 else hud_pts[-1]
-        cv2.circle(canvas, tip, 12, tip_color, 2, cv2.LINE_AA)
-        label = hand.handedness
-        if mat_corners is not None:
-            try:
-                cm = image_points_to_mat_cm([hand.index_tip], mat_corners, mat_config)[0]
-                label = f"{hand.handedness} {cm[0]:.1f},{cm[1]:.1f}cm"
-            except Exception:
-                pass
-        cv2.putText(
-            canvas,
-            label,
-            (tip[0] + 14, tip[1] - 8),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.55,
-            tip_color,
-            1,
-            cv2.LINE_AA,
-        )
-
-
 def format_idle_time(now: Optional[datetime] = None) -> str:
     """24h wall clock without seconds (idle HUD v1)."""
     stamp = now or datetime.now()
@@ -230,19 +184,16 @@ def draw_idle_hud(
 def draw_desk_hud(
     canvas_bgr: np.ndarray,
     *,
-    hands: Sequence[HandResult],
     mat_corners: Optional[np.ndarray],
     mat_config: MatConfig,
     src_size: Tuple[int, int],
     fps_live: float,
-    track_fps: float,
-    mat_ok: bool,
     analysis: Optional[ObjectAnalysis] = None,
     measure_config: Optional[MatConfig] = None,
     overlays: Optional[OverlayFlags] = None,
     homography: Optional[CamProjectorHomography] = None,
 ) -> np.ndarray:
-    """Dark projector HUD: mat, object outline+cm, hand skeleton.
+    """Dark projector HUD: mat outline + object outline+cm.
 
     Measure/work mode replaces idle entirely — do not composite the idle clock here.
     When ``homography`` is set, overlays lock to the desk via cam↔projector H;
@@ -258,11 +209,6 @@ def draw_desk_hud(
     if flags.object and analysis is not None and mat_corners is not None:
         _draw_object(
             canvas_bgr, analysis, mat_corners, measure_cfg, src_size, homography
-        )
-
-    if flags.hands:
-        _draw_hands(
-            canvas_bgr, hands, mat_corners, mat_config, src_size, homography
         )
 
     # Projector HUD: FPS number only (no status chrome).
@@ -282,11 +228,9 @@ def draw_desk_hud(
 def draw_debug_camera(
     frame_bgr: np.ndarray,
     *,
-    hands: Sequence[HandResult],
     mat_corners: Optional[np.ndarray],
     mat_config: MatConfig,
     fps_live: float,
-    track_fps: float,
     mat_ok: bool,
     analysis: Optional[ObjectAnalysis] = None,
     measure_config: Optional[MatConfig] = None,
@@ -302,14 +246,12 @@ def draw_debug_camera(
         _draw_mat(out, mat_corners, mat_config, src_size)
     if flags.object and analysis is not None and mat_corners is not None:
         _draw_object(out, analysis, mat_corners, measure_cfg, src_size)
-    if flags.hands:
-        _draw_hands(out, hands, mat_corners, mat_config, src_size)
 
     status = "mat:lock" if mat_ok else "mat:--"
     obj = "obj:yes" if analysis is not None else "obj:--"
     cv2.putText(
         out,
-        f"fps={fps_live:.1f}  track={track_fps:.1f}Hz  hands={len(hands)}  {status}  {obj}",
+        f"fps={fps_live:.1f}  {status}  {obj}",
         (12, 28),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.7,

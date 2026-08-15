@@ -5,10 +5,9 @@ Modes:
   measure               Photo edge measurement (existing)
   calibrate-camera      Chessboard fisheye/pinhole calibration for USB cam
   calibrate-projector   Projected chessboard → cam↔projector homography
-  hands                 Live hand tracking (optional --project HUD on HY300)
   idle                  Cheap projector HUD: top-left time only (no camera)
-  debug                 Local GUI: camera or examples/ images, test idle/hands/desk
-  desk                  Mat find + object measure + hands + projector HUD
+  debug                 Local GUI: camera or examples/ images, test idle/desk
+  desk                  Mat find + object measure + projector HUD
   projector-list        List outputs (wlr-randr / xrandr / DRM)
   projector-test        Fullscreen alignment pattern on HY300 (HDMI-A-1)
 """
@@ -117,7 +116,7 @@ def build_parser() -> argparse.ArgumentParser:
     calib_proj.add_argument(
         "--capture",
         default=None,
-        help="Optional camera capture WxH (match desk/hands capture for best H)",
+        help="Optional camera capture WxH (match desk capture for best H)",
     )
     calib_proj.add_argument(
         "--rotate",
@@ -127,75 +126,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="Override camera rotate_degrees for this run",
     )
 
-    hands = sub.add_parser(
-        "hands",
-        help="Live MediaPipe hand tracking (optionally project HUD to HY300)",
-    )
-    hands.add_argument(
-        "--camera-config",
-        type=Path,
-        default=DEFAULT_CAMERA_CONFIG,
-        help="Camera YAML with optional calibration",
-    )
-    hands.add_argument("--device", type=int, default=None, help="Force V4L2 index")
-    hands.add_argument("--no-undistort", action="store_true")
-    hands.add_argument(
-        "--project",
-        action="store_true",
-        help="Project hand HUD fullscreen on HY300 (dark canvas + skeleton)",
-    )
-    hands.add_argument(
-        "--projector-config",
-        type=Path,
-        default=DEFAULT_PROJECTOR_CONFIG,
-        help="Projector YAML (default: config/projector.yaml)",
-    )
-    hands.add_argument(
-        "--output",
-        default=None,
-        help="Override projector output name (e.g. HDMI-A-1)",
-    )
-    hands.add_argument(
-        "--show",
-        choices=("auto", "mpv", "opencv"),
-        default="auto",
-        help="Projector sink when --project (default: auto → ffplay/mpv)",
-    )
-    hands.add_argument(
-        "--preview",
-        action="store_true",
-        help="Also show local OpenCV camera preview (off by default with --project)",
-    )
-    hands.add_argument(
-        "--no-preview",
-        action="store_true",
-        help="Never open local OpenCV preview window",
-    )
-    hands.add_argument(
-        "--track-size",
-        default="640x360",
-        help="MediaPipe inference size WxH (default 640x360; use full for camera native)",
-    )
-    hands.add_argument(
-        "--capture",
-        default=None,
-        help="Optional camera capture WxH override (e.g. 1280x720) for more FPS",
-    )
-    hands.add_argument(
-        "--hud-size",
-        default="1280x720",
-        help="Projector HUD / video-sink size WxH (default 1280x720; use full for projector native)",
-    )
-    hands.add_argument(
-        "--track-every",
-        type=int,
-        default=1,
-        help="Run MediaPipe every Nth frame; reuse last hands otherwise (default 1 = every frame)",
-    )
-
     desk = sub.add_parser(
         "desk",
-        help="Live mat detection + hand tracking + projector HUD",
+        help="Live mat detection + object measure + projector HUD",
     )
     desk.add_argument(
         "--camera-config",
@@ -229,11 +162,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="Projector sink (default: auto → ffplay/mpv)",
     )
     desk.add_argument(
-        "--track-size",
-        default="480x270",
-        help="MediaPipe inference size WxH (default 480x270)",
-    )
-    desk.add_argument(
         "--capture",
         default="960x540",
         help="Camera capture WxH (default 960x540)",
@@ -242,12 +170,6 @@ def build_parser() -> argparse.ArgumentParser:
         "--hud-size",
         default="640x360",
         help="Projector HUD size WxH (default 640x360)",
-    )
-    desk.add_argument(
-        "--track-every",
-        type=int,
-        default=1,
-        help="Run MediaPipe every Nth frame (default 1)",
     )
     desk.add_argument(
         "--mat-every",
@@ -348,7 +270,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     debug.add_argument(
         "--mode",
-        choices=("idle", "hands", "desk"),
+        choices=("idle", "desk"),
         default="desk",
         help="Initial mode (default: desk)",
     )
@@ -572,220 +494,6 @@ def _parse_size(text: str | None, *, allow_full: bool = True) -> tuple[int, int]
     return w, h
 
 
-def cmd_hands(args: argparse.Namespace) -> int:
-    import cv2
-    import numpy as np
-
-    from src.vision.camera import Camera
-    from src.vision.hands import HandTracker
-    from src.vision.projector import (
-        MpvFrameSink,
-        ProjectorSurface,
-        ensure_gui_env,
-        opencv_gui_hint,
-    )
-    from src.vision.undistort import Undistorter
-
-    cfg = _load_or_bootstrap_camera_config(args.camera_config)
-    if args.device is not None:
-        cfg.device_indices = [args.device] + [i for i in cfg.device_indices if i != args.device]
-    try:
-        capture = _parse_size(args.capture, allow_full=True) if args.capture else None
-        track_size = _parse_size(args.track_size, allow_full=True)
-        hud_size = _parse_size(args.hud_size, allow_full=True)
-    except ValueError as exc:
-        print(exc)
-        return 1
-    if capture is not None:
-        cfg.width, cfg.height = capture
-
-    und = Undistorter(cfg)
-    if args.no_undistort:
-        from src.vision.camera import CameraConfig as CC
-
-        und = Undistorter(CC())  # no K/D → passthrough
-
-    project = bool(args.project)
-    # With --project, skip local OpenCV window unless --preview (Qt/xcb often aborts on Pi).
-    want_preview = (not project and not args.no_preview) or (project and args.preview)
-    if args.no_preview:
-        want_preview = False
-
-    proj_cfg = None
-    surface: ProjectorSurface | None = None
-    mpv: MpvFrameSink | None = None
-    proj_w = proj_h = 0
-    hud_w = hud_h = 0
-    show = "mpv"
-    if project:
-        proj_cfg = _load_or_bootstrap_projector_config(args.projector_config)
-        if args.output:
-            proj_cfg.output_name = args.output
-        env = ensure_gui_env()
-        if env.get("fixed"):
-            print("auto-set:", ", ".join(env["fixed"]))
-        surface = ProjectorSurface(proj_cfg)
-        info = surface.prepare()
-        proj_w, proj_h = int(proj_cfg.width), int(proj_cfg.height)
-        if hud_size is None:
-            hud_w, hud_h = proj_w, proj_h
-        else:
-            hud_w, hud_h = hud_size
-        print(
-            f"Projector: {info.name} {info.width}x{info.height}@{info.refresh_hz:.3f}Hz "
-            f"hud={hud_w}x{hud_h} source={info.source}"
-        )
-        show = args.show if args.show != "auto" else "mpv"
-
-    cam = Camera(cfg)
-    tracker = HandTracker(infer_size=track_size)
-    window = "prismdesk-hands"
-    if want_preview:
-        try:
-            cv2.namedWindow(window, cv2.WINDOW_NORMAL)
-        except Exception as exc:  # noqa: BLE001
-            print(f"local preview unavailable: {exc}")
-            print(opencv_gui_hint())
-            want_preview = False
-            if not project:
-                return 1
-
-    idx = cam.open()
-    w, h, fps = cam.negotiated()
-    track_label = (
-        f"{tracker.infer_size[0]}x{tracker.infer_size[1]}"
-        if tracker.infer_size
-        else f"{w}x{h} (full)"
-    )
-    track_every = max(1, int(args.track_every))
-    print(
-        f"Hands: camera index={idx} negotiated={w}x{h}@{fps:.1f} "
-        f"track={track_label} every={track_every} "
-        f"undistort={'on' if und.enabled else 'off (calibrate-camera first)'} "
-        f"project={'on' if project else 'off'} preview={'on' if want_preview else 'off'}"
-    )
-
-    # Start video sink only after model + camera are ready.
-    if project:
-        sink_fps = float(fps) if fps and fps > 1 else float(cfg.fps or 30)
-        if show == "mpv":
-            try:
-                mpv = MpvFrameSink(hud_w, hud_h, fps=sink_fps)
-            except Exception as exc:  # noqa: BLE001
-                print(f"video sink failed: {exc}")
-                print(
-                    "OpenCV fullscreen is disabled by default on Pi "
-                    "(pip Qt/xcb aborts). Fix the sink or install: sudo apt install ffmpeg"
-                )
-                print(opencv_gui_hint())
-                tracker.close()
-                cam.close()
-                return 1
-        elif show == "opencv":
-            # Explicit only — pip OpenCV often aborts with no catchable exception.
-            try:
-                surface.open()
-            except Exception as exc:  # noqa: BLE001
-                print(opencv_gui_hint())
-                print(f"error: {exc}")
-                tracker.close()
-                cam.close()
-                return 1
-        print(
-            "HUD mapping: "
-            + (
-                f"homography (reproj≈{proj_cfg.homography.reprojection_error_px:.1f}px)"
-                if proj_cfg.homography is not None
-                and proj_cfg.homography.reprojection_error_px is not None
-                else ("homography" if proj_cfg.homography is not None else "stretch (run calibrate-projector)")
-            )
-            + ". Ctrl+C or q quit"
-        )
-    else:
-        print("q quit")
-
-    frames = 0
-    track_frames = 0
-    t0 = time.time()
-    hud = None
-    hands = []
-    cam_proj_h = proj_cfg.homography if project and proj_cfg is not None else None
-    try:
-        while True:
-            frame = cam.read()
-            if und.enabled and not args.no_undistort:
-                frame = und.apply(frame)
-            frames += 1
-            if (frames - 1) % track_every == 0:
-                hands = tracker.process(frame)
-                track_frames += 1
-            elapsed = max(time.time() - t0, 1e-6)
-            fps_live = frames / elapsed
-            track_fps = track_frames / elapsed
-
-            if project:
-                if hud is None or hud.shape[:2] != (hud_h, hud_w):
-                    hud = np.zeros((hud_h, hud_w, 3), dtype=np.uint8)
-                else:
-                    hud[:] = 0
-                tracker.draw_hud(
-                    hud,
-                    hands,
-                    src_size=(frame.shape[1], frame.shape[0]),
-                    homography=cam_proj_h,
-                )
-                cv2.putText(
-                    hud,
-                    f"fps={fps_live:.1f}  track={track_fps:.1f}Hz/{track_every}  "
-                    f"hands={len(hands)}  {track_label}",
-                    (24, 40),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.7,
-                    (255, 255, 0),
-                    2,
-                )
-                if mpv is not None:
-                    mpv.show(hud)
-                elif surface is not None:
-                    surface.show(hud)
-
-            if want_preview:
-                view = tracker.draw(frame, hands)
-                cv2.putText(
-                    view,
-                    f"idx={idx}  fps={fps_live:.1f}  track={track_fps:.1f}Hz/{track_every}  "
-                    f"hands={len(hands)}  q=quit",
-                    (12, 32),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.65,
-                    (0, 255, 255),
-                    2,
-                )
-                cv2.imshow(window, view)
-                if cv2.waitKey(1) & 0xFF == ord("q"):
-                    break
-            elif mpv is not None and not mpv.alive:
-                print("video sink closed — exiting")
-                break
-            else:
-                time.sleep(0.001)
-    except KeyboardInterrupt:
-        print("\nInterrupted")
-    finally:
-        tracker.close()
-        cam.close()
-        if mpv is not None:
-            mpv.close()
-        if surface is not None:
-            surface.close()
-        if want_preview:
-            try:
-                cv2.destroyAllWindows()
-            except Exception:
-                pass
-    return 0
-
-
 def cmd_idle(args: argparse.Namespace) -> int:
     """Cheap adaptive default: projector time HUD, no camera/vision."""
     import cv2
@@ -897,16 +605,14 @@ def cmd_debug(args: argparse.Namespace) -> int:
 
 
 def cmd_desk(args: argparse.Namespace) -> int:
-    """All-in-one live: mat find + object measure + hands + projector HUD."""
+    """All-in-one live: mat find + object measure + projector HUD."""
     import cv2
     from dataclasses import replace
 
     from src.core.home_hub import HomeHubPublisher, load_home_hub_config
     from src.measure.mat import load_mat_config
-    from src.ui.audio_level import AudioLevelMeter, load_audio_config
     from src.vision.camera import Camera, ThreadedCamera
     from src.vision.desk_runtime import DeskRuntime, DeskRuntimeConfig
-    from src.vision.hands import HandTracker
     from src.vision.projector import (
         MpvFrameSink,
         ProjectorSurface,
@@ -914,9 +620,6 @@ def cmd_desk(args: argparse.Namespace) -> int:
         opencv_gui_hint,
     )
     from src.vision.undistort import Undistorter
-
-    DEFAULT_AUDIO = ROOT / "config" / "audio.yaml"
-    EXAMPLE_AUDIO = ROOT / "config" / "audio.example.yaml"
 
     mat_config = load_mat_config(args.mat_config)
     # Lighter warp for live FPS; outline maps back via same config's homography.
@@ -952,7 +655,6 @@ def cmd_desk(args: argparse.Namespace) -> int:
         ]
     try:
         capture = _parse_size(args.capture, allow_full=True)
-        track_size = _parse_size(args.track_size, allow_full=True)
         hud_size = _parse_size(args.hud_size, allow_full=True)
     except ValueError as exc:
         print(exc)
@@ -997,21 +699,14 @@ def cmd_desk(args: argparse.Namespace) -> int:
         print("HUD mapping: stretch — run `python main.py calibrate-projector`")
 
     cam = ThreadedCamera(Camera(cfg))
-    tracker = HandTracker(infer_size=track_size)
     idx = cam.open()
     w, h, fps = cam.negotiated()
-    track_every = max(1, int(args.track_every))
     mat_every = max(1, int(args.mat_every))
     object_every = max(1, int(args.object_every))
     do_object = not bool(args.no_object)
-    track_label = (
-        f"{tracker.infer_size[0]}x{tracker.infer_size[1]}"
-        if tracker.infer_size
-        else f"{w}x{h}"
-    )
     print(
-        f"Desk: camera={idx} {w}x{h}@{fps:.1f} track={track_label} "
-        f"every={track_every} mat_every={mat_every} object_every={object_every} "
+        f"Desk: camera={idx} {w}x{h}@{fps:.1f} "
+        f"mat_every={mat_every} object_every={object_every} "
         f"measure_ppc={measure_ppc:.0f} object={'on' if do_object else 'off'} "
         f"threads=on home-hub={'on' if hub is not None else 'off'} "
         f"mat={mat_config.width_cm:.0f}x{mat_config.height_cm:.0f}cm "
@@ -1034,7 +729,6 @@ def cmd_desk(args: argparse.Namespace) -> int:
         except Exception as exc:  # noqa: BLE001
             print(f"video sink failed: {exc}")
             print(opencv_gui_hint())
-            tracker.close()
             cam.close()
             return 1
 
@@ -1050,7 +744,6 @@ def cmd_desk(args: argparse.Namespace) -> int:
         except Exception as exc:  # noqa: BLE001
             print(opencv_gui_hint())
             print(f"error: {exc}")
-            tracker.close()
             cam.close()
             return 1
 
@@ -1061,26 +754,15 @@ def cmd_desk(args: argparse.Namespace) -> int:
             return True
 
     else:
-        tracker.close()
         cam.close()
         return 1
 
-    audio_path = DEFAULT_AUDIO if DEFAULT_AUDIO.is_file() else EXAMPLE_AUDIO
-    audio_cfg = load_audio_config(audio_path)
-    audio = AudioLevelMeter(audio_cfg)
-    if audio_cfg.device is not None:
-        print(f"audio: device={audio_cfg.device!r}")
-    else:
-        print("audio: default input device (USB cam mic if selected by OS)")
-
     runtime = DeskRuntime(
         camera=cam,
-        tracker=tracker,
         cfg=DeskRuntimeConfig(
             mat_config=mat_config,
             measure_config=measure_config,
             undistorter=und,
-            track_every=track_every,
             mat_every=mat_every,
             object_every=object_every,
             do_object=do_object,
@@ -1093,15 +775,12 @@ def cmd_desk(args: argparse.Namespace) -> int:
         show_fn=show_fn,
         alive_fn=alive_fn,
         hub=hub,
-        audio=audio,
-        enable_panel=True,
     )
     print("Desk HUD on projector — Ctrl+C quit")
     runtime.start()
     try:
         runtime.run_until_stop()
     finally:
-        tracker.close()
         cam.close()
         if mpv is not None:
             mpv.close()
@@ -1247,7 +926,6 @@ def main() -> int:
             "measure",
             "calibrate-camera",
             "calibrate-projector",
-            "hands",
             "idle",
             "debug",
             "desk",
@@ -1265,8 +943,6 @@ def main() -> int:
         return cmd_calibrate_camera(args)
     if args.command == "calibrate-projector":
         return cmd_calibrate_projector(args)
-    if args.command == "hands":
-        return cmd_hands(args)
     if args.command == "idle":
         return cmd_idle(args)
     if args.command == "debug":

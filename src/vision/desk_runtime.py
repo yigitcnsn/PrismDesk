@@ -2,11 +2,10 @@
 
 Layers (each on its own thread):
   frame   — camera read + undistort
-  hands   — MediaPipe
   mat     — mat corner detect
   object  — silhouette measure
   display — projector HUD
-  hub-*   — home-hub debug layers (raw/mat/hands/object/final), one thread each
+  hub-*   — home-hub debug layers (raw/mat/object/final), one thread each
 """
 
 from __future__ import annotations
@@ -24,10 +23,7 @@ from src.measure.mat import MatConfig, detect_mat_corners
 from src.measure.object import analyze_object
 from src.measure.perspective import warp_to_mat_plane
 from src.measure.shape import ObjectAnalysis
-from src.ui.audio_level import AudioLevelMeter
-from src.ui.control_panel import ControlPanel
 from src.vision.desk import draw_debug_camera, draw_desk_hud, format_object_metrics
-from src.vision.hands import HandResult, HandTracker
 from src.vision.homography import CamProjectorHomography
 from src.vision.undistort import Undistorter
 
@@ -40,7 +36,6 @@ class DeskRuntimeConfig:
     mat_config: MatConfig
     measure_config: MatConfig
     undistorter: Undistorter
-    track_every: int = 1
     mat_every: int = 12
     object_every: int = 15
     do_object: bool = True
@@ -58,10 +53,6 @@ class _Shared:
     frame: Optional[np.ndarray] = None
     frame_id: int = 0
     cam_error: Optional[str] = None
-    # Hands
-    hands_lock: threading.Lock = field(default_factory=threading.Lock)
-    hands: List[HandResult] = field(default_factory=list)
-    track_count: int = 0
     # Mat
     mat_lock: threading.Lock = field(default_factory=threading.Lock)
     mat_corners: Optional[np.ndarray] = None
@@ -69,7 +60,7 @@ class _Shared:
     object_lock: threading.Lock = field(default_factory=threading.Lock)
     analysis: Optional[ObjectAnalysis] = None
     last_metrics: str = ""
-    # Projector Visual flags (desk panel + hub sync)
+    # Projector Visual flags (hub sync)
     overlay_lock: threading.Lock = field(default_factory=threading.Lock)
     projector_overlays: OverlayFlags = field(default_factory=OverlayFlags)
     # Display pacing
@@ -84,54 +75,30 @@ class DeskRuntime:
         self,
         *,
         camera: Any,
-        tracker: HandTracker,
         cfg: DeskRuntimeConfig,
         hud_size: tuple[int, int],
         show_fn: ShowFn,
         alive_fn: Optional[Callable[[], bool]] = None,
         hub: Optional[HomeHubPublisher] = None,
-        audio: Optional[AudioLevelMeter] = None,
-        enable_panel: bool = True,
     ) -> None:
         self._cam = camera
-        self._tracker = tracker
         self._cfg = cfg
         self._hud_w, self._hud_h = hud_size
         self._show = show_fn
         self._alive = alive_fn or (lambda: True)
         self._hub = hub
-        self._audio = audio
         self._shared = _Shared()
         self._threads: List[threading.Thread] = []
         if hub is not None:
             self._shared.projector_overlays = OverlayFlags(
                 mat=hub.projector_overlays.mat,
                 object=hub.projector_overlays.object,
-                hands=hub.projector_overlays.hands,
             )
-        self._panel: Optional[ControlPanel] = None
-        if enable_panel:
-            self._panel = ControlPanel(on_visual_change=self._on_visual_change)
-            self._panel.set_flags(self._shared.projector_overlays)
-
-    def _on_visual_change(self, flags: OverlayFlags) -> None:
-        with self._shared.overlay_lock:
-            self._shared.projector_overlays = OverlayFlags(
-                mat=flags.mat, object=flags.object, hands=flags.hands
-            )
-        if self._hub is not None:
-            self._hub.push_config(flags, mirror_browser=True)
-        else:
-            # Keep local hub-less flags only.
-            pass
 
     def start(self) -> None:
         self._shared.t0 = time.time()
-        if self._audio is not None:
-            self._audio.start()
         workers = [
             ("desk-frame", self._frame_loop),
-            ("desk-hands", self._hands_loop),
             ("desk-mat", self._mat_loop),
             ("desk-object", self._object_loop),
             ("desk-display", self._display_loop),
@@ -156,8 +123,6 @@ class DeskRuntime:
         for t in self._threads:
             t.join(timeout=2.0)
         self._threads.clear()
-        if self._audio is not None:
-            self._audio.stop()
 
     def run_until_stop(self) -> None:
         """Block until Ctrl+C / sink death / stop flag."""
@@ -178,12 +143,9 @@ class DeskRuntime:
                 return None, self._shared.frame_id
             return self._shared.frame.copy(), self._shared.frame_id
 
-    def _fps(self) -> tuple[float, float]:
+    def _fps(self) -> float:
         elapsed = max(time.time() - self._shared.t0, 1e-6)
-        with self._shared.hands_lock:
-            track_count = self._shared.track_count
-        display_count = self._shared.display_count
-        return display_count / elapsed, track_count / elapsed
+        return self._shared.display_count / elapsed
 
     def _frame_loop(self) -> None:
         und = self._cfg.undistorter
@@ -196,32 +158,10 @@ class DeskRuntime:
                     self._shared.frame = frame
                     self._shared.frame_id += 1
                     self._shared.cam_error = None
-            except Exception as exc:  # noqa: BLE001
+            except Exception as vis_exc:  # noqa: BLE001
                 with self._shared.frame_lock:
-                    self._shared.cam_error = str(exc)
+                    self._shared.cam_error = str(vis_exc)
                 time.sleep(0.2)
-
-    def _hands_loop(self) -> None:
-        last_id = -1
-        every = max(1, int(self._cfg.track_every))
-        seen = 0
-        while not self._shared.stop.is_set():
-            frame, fid = self._snapshot_frame()
-            if frame is None or fid == last_id:
-                time.sleep(0.001)
-                continue
-            last_id = fid
-            seen += 1
-            if (seen - 1) % every != 0:
-                continue
-            try:
-                hands = self._tracker.process(frame)
-            except Exception as exc:  # noqa: BLE001
-                print(f"hands skipped: {exc}", flush=True)
-                continue
-            with self._shared.hands_lock:
-                self._shared.hands = list(hands)
-                self._shared.track_count += 1
 
     def _mat_loop(self) -> None:
         last_id = -1
@@ -238,8 +178,8 @@ class DeskRuntime:
                 continue
             try:
                 found = detect_mat_corners(frame, self._cfg.mat_config)
-            except Exception as exc:  # noqa: BLE001
-                print(f"mat detect skipped: {exc}", flush=True)
+            except Exception as vis_exc:  # noqa: BLE001
+                print(f"mat detect skipped: {vis_exc}", flush=True)
                 continue
             if found is not None:
                 with self._shared.mat_lock:
@@ -271,8 +211,8 @@ class DeskRuntime:
             try:
                 warped, _ = warp_to_mat_plane(frame, mat, self._cfg.measure_config)
                 analysis = analyze_object(warped, self._cfg.measure_config)
-            except Exception as exc:  # noqa: BLE001
-                print(f"object measure skipped: {exc}", flush=True)
+            except Exception as vis_exc:  # noqa: BLE001
+                print(f"object measure skipped: {vis_exc}", flush=True)
                 continue
             with self._shared.object_lock:
                 self._shared.analysis = analysis
@@ -311,8 +251,6 @@ class DeskRuntime:
                 time.sleep(0.05)
                 continue
 
-            with self._shared.hands_lock:
-                hands = list(self._shared.hands)
             with self._shared.mat_lock:
                 mat = (
                     None
@@ -325,39 +263,23 @@ class DeskRuntime:
                 overlays = OverlayFlags(
                     mat=self._shared.projector_overlays.mat,
                     object=self._shared.projector_overlays.object,
-                    hands=self._shared.projector_overlays.hands,
                 )
-            fps_live, track_fps = self._fps()
+            fps_live = self._fps()
             draw_desk_hud(
                 hud,
-                hands=hands,
                 mat_corners=mat,
                 mat_config=self._cfg.mat_config,
                 src_size=(frame.shape[1], frame.shape[0]),
                 fps_live=fps_live,
-                track_fps=track_fps,
-                mat_ok=mat is not None,
                 analysis=analysis if self._cfg.do_object else None,
                 measure_config=self._cfg.measure_config,
                 overlays=overlays,
                 homography=self._cfg.homography,
             )
-            if self._panel is not None:
-                if self._audio is not None:
-                    self._panel.set_level(
-                        self._audio.level, available=self._audio.available
-                    )
-                self._panel.update(
-                    hands,
-                    src_size=(frame.shape[1], frame.shape[0]),
-                    hud_size=(self._hud_w, self._hud_h),
-                    homography=self._cfg.homography,
-                )
-                self._panel.draw(hud)
             try:
                 self._show(hud)
-            except Exception as exc:  # noqa: BLE001
-                print(f"display failed: {exc}", flush=True)
+            except Exception as vis_exc:  # noqa: BLE001
+                print(f"display failed: {vis_exc}", flush=True)
                 self._shared.stop.set()
                 break
             self._shared.display_count += 1
@@ -371,10 +293,8 @@ class DeskRuntime:
                 flags = self._hub.fetch_config()
                 with self._shared.overlay_lock:
                     self._shared.projector_overlays = OverlayFlags(
-                        mat=flags.mat, object=flags.object, hands=flags.hands
+                        mat=flags.mat, object=flags.object
                     )
-                if self._panel is not None:
-                    self._panel.set_flags(flags)
             except Exception:
                 pass
             self._shared.stop.wait(every)
@@ -384,8 +304,6 @@ class DeskRuntime:
         every = max(0.1, float(self._cfg.hub_publish_every))
         while not self._shared.stop.is_set():
             frame, _fid = self._snapshot_frame()
-            with self._shared.hands_lock:
-                hands = list(self._shared.hands)
             with self._shared.mat_lock:
                 mat_ok = self._shared.mat_corners is not None
             with self._shared.object_lock:
@@ -394,21 +312,17 @@ class DeskRuntime:
                 local = OverlayFlags(
                     mat=self._shared.projector_overlays.mat,
                     object=self._shared.projector_overlays.object,
-                    hands=self._shared.projector_overlays.hands,
                 )
-            # Prefer desk-local flags for state so webpage sees pinch toggles immediately.
             self._hub.projector_overlays = local
             self._hub.browser_overlays = OverlayFlags(
-                mat=local.mat, object=local.object, hands=local.hands
+                mat=local.mat, object=local.object
             )
-            fps_live, track_fps = self._fps()
+            fps_live = self._fps()
             proj = self._hub.projector_overlays
             browser = self._hub.browser_overlays
             state = {
                 "fps": round(fps_live, 2),
-                "track_fps": round(track_fps, 2),
                 "mat_locked": mat_ok,
-                "hands": len(hands),
                 "object": (
                     format_object_metrics(analysis) if analysis is not None else None
                 ),
@@ -439,8 +353,8 @@ class DeskRuntime:
                 t_start = time.time()
                 try:
                     self._publish_one_layer(layer)
-                except Exception as exc:  # noqa: BLE001
-                    print(f"hub layer {layer} skipped: {exc}", flush=True)
+                except Exception as vis_exc:  # noqa: BLE001
+                    print(f"hub layer {layer} skipped: {vis_exc}", flush=True)
                 elapsed = time.time() - t_start
                 self._shared.stop.wait(max(0.0, every - elapsed))
 
@@ -451,8 +365,6 @@ class DeskRuntime:
         frame, _fid = self._snapshot_frame()
         if frame is None:
             return
-        with self._shared.hands_lock:
-            hands = list(self._shared.hands)
         with self._shared.mat_lock:
             mat = (
                 None
@@ -465,9 +377,8 @@ class DeskRuntime:
             browser = OverlayFlags(
                 mat=self._shared.projector_overlays.mat,
                 object=self._shared.projector_overlays.object,
-                hands=self._shared.projector_overlays.hands,
             )
-        fps_live, track_fps = self._fps()
+        fps_live = self._fps()
         measure_cfg = self._cfg.measure_config
         mat_cfg = self._cfg.mat_config
         do_object = self._cfg.do_object
@@ -477,50 +388,31 @@ class DeskRuntime:
         elif layer == "mat":
             img = draw_debug_camera(
                 frame,
-                hands=[],
                 mat_corners=mat,
                 mat_config=mat_cfg,
                 fps_live=fps_live,
-                track_fps=track_fps,
                 mat_ok=mat is not None,
                 analysis=None,
                 measure_config=measure_cfg,
-                overlays=OverlayFlags(mat=True, object=False, hands=False),
-            )
-        elif layer == "hands":
-            img = draw_debug_camera(
-                frame,
-                hands=hands,
-                mat_corners=None,
-                mat_config=mat_cfg,
-                fps_live=fps_live,
-                track_fps=track_fps,
-                mat_ok=False,
-                analysis=None,
-                measure_config=measure_cfg,
-                overlays=OverlayFlags(mat=False, object=False, hands=True),
+                overlays=OverlayFlags(mat=True, object=False),
             )
         elif layer == "object":
             img = draw_debug_camera(
                 frame,
-                hands=[],
                 mat_corners=mat,
                 mat_config=mat_cfg,
                 fps_live=fps_live,
-                track_fps=track_fps,
                 mat_ok=mat is not None,
                 analysis=analysis if do_object else None,
                 measure_config=measure_cfg,
-                overlays=OverlayFlags(mat=False, object=True, hands=False),
+                overlays=OverlayFlags(mat=False, object=True),
             )
         else:  # final
             img = draw_debug_camera(
                 frame,
-                hands=hands,
                 mat_corners=mat,
                 mat_config=mat_cfg,
                 fps_live=fps_live,
-                track_fps=track_fps,
                 mat_ok=mat is not None,
                 analysis=analysis if do_object else None,
                 measure_config=measure_cfg,

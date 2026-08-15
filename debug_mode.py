@@ -1,6 +1,6 @@
 """PrismDesk local debug GUI (Tkinter).
 
-Browse example stills or optionally use a live camera. Test idle / hands / desk
+Browse example stills or optionally use a live camera. Test idle / desk
 without a Pi or projector.
 
 Run:
@@ -49,13 +49,12 @@ from src.vision.desk import (
     format_object_metrics,
 )
 from src.vision.frame_source import ImageFolderSource, list_example_images
-from src.vision.hands import HandTracker
 from src.vision.undistort import Undistorter
 
 DEFAULT_EXAMPLES = ROOT / "examples"
 DEFAULT_DUMPS = ROOT / "debug_dumps"
 DEFAULT_LOG = DEFAULT_DUMPS / "debug_mode.log"
-MODES = ("idle", "hands", "desk")
+MODES = ("idle", "desk")
 PREVIEW_MAX = 900
 
 # Explicit colors — avoid ttk/Aqua blank-window bug on macOS system Tk.
@@ -222,12 +221,9 @@ class DebugGui:
         self.mode = start_mode if start_mode in MODES else "desk"
         self.view = "camera"
         self.show_object = True
-        self.show_hands = True
         self.show_mat = True
 
         self._source: Optional[FrameSource] = None
-        self._tracker: Optional[HandTracker] = None
-        self._hands: list = []
         self._mat_corners = None
         self._analysis = None
         self._last_metrics = ""
@@ -454,15 +450,11 @@ class DebugGui:
         ov = self._section(left_inner, "Overlays")
         self.var_mat = tk.BooleanVar(value=True)
         self.var_object = tk.BooleanVar(value=True)
-        self.var_hands = tk.BooleanVar(value=True)
         _check(ov, text="Mat", variable=self.var_mat, command=self._on_overlay).pack(
             fill="x"
         )
         _check(
             ov, text="Object measure", variable=self.var_object, command=self._on_overlay
-        ).pack(fill="x")
-        _check(
-            ov, text="Hands", variable=self.var_hands, command=self._on_overlay
         ).pack(fill="x")
 
         # --- Measure ---
@@ -558,7 +550,6 @@ class DebugGui:
         self.var_view.set(self.view)
         self.var_mat.set(self.show_mat)
         self.var_object.set(self.show_object)
-        self.var_hands.set(self.show_hands)
         self.var_ppc.set(self.measure_px_per_cm)
         self.var_undistort.set(not self.no_undistort)
         self.var_folder.set(str(self.examples_dir))
@@ -674,7 +665,6 @@ class DebugGui:
     def _on_overlay(self) -> None:
         self.show_mat = bool(self.var_mat.get())
         self.show_object = bool(self.var_object.get())
-        self.show_hands = bool(self.var_hands.get())
         self._force_tick()
 
     def _on_ppc(self) -> None:
@@ -769,11 +759,6 @@ class DebugGui:
         self._force_tick()
         return True
 
-    def _ensure_tracker(self) -> HandTracker:
-        if self._tracker is None:
-            self._tracker = HandTracker(infer_size=(480, 270))
-        return self._tracker
-
     def _read_frame(self) -> Optional[np.ndarray]:
         if self._source is None:
             return None
@@ -795,22 +780,12 @@ class DebugGui:
 
         self.show_mat = bool(self.var_mat.get())
         self.show_object = bool(self.var_object.get())
-        self.show_hands = bool(self.var_hands.get())
         self.mode = self.var_mode.get()
         self.view = self.var_view.get()
 
         if self.mode == "idle":
             draw_idle_hud(hud)
             return frame.copy(), hud
-
-        if self.mode in ("hands", "desk") and self.show_hands:
-            try:
-                self._hands = self._ensure_tracker().process(frame)
-            except Exception as exc:  # noqa: BLE001
-                self._hands = []
-                self._set_status(f"hands error: {exc}")
-        else:
-            self._hands = []
 
         if self.mode == "desk" and self.show_mat:
             found = detect_mat_corners(frame, self.mat_config)
@@ -841,15 +816,12 @@ class DebugGui:
         overlays = OverlayFlags(
             mat=self.show_mat and self.mode == "desk",
             object=self.show_object and self.mode == "desk",
-            hands=self.show_hands and self.mode in ("hands", "desk"),
         )
         cam_view = draw_debug_camera(
             frame,
-            hands=self._hands,
             mat_corners=self._mat_corners if self.mode == "desk" else None,
             mat_config=self.mat_config,
             fps_live=fps_live,
-            track_fps=fps_live,
             mat_ok=self._mat_corners is not None and self.mode == "desk",
             analysis=self._analysis,
             measure_config=self.measure_config,
@@ -857,13 +829,10 @@ class DebugGui:
         )
         draw_desk_hud(
             hud,
-            hands=self._hands,
             mat_corners=self._mat_corners if self.mode == "desk" else None,
             mat_config=self.mat_config,
             src_size=(w, h),
             fps_live=fps_live,
-            track_fps=fps_live,
-            mat_ok=self._mat_corners is not None and self.mode == "desk",
             analysis=self._analysis,
             measure_config=self.measure_config,
             overlays=overlays,
@@ -961,11 +930,6 @@ class DebugGui:
             except Exception:
                 pass
             self._ui_log_handler = None
-        if self._tracker is not None:
-            try:
-                self._tracker.close()
-            except Exception:
-                pass
         self._close_source()
         self.root.destroy()
         LOG.info("window destroyed")
@@ -1001,7 +965,7 @@ def main() -> int:
         "--source", choices=("images", "camera"), default="images"
     )
     parser.add_argument(
-        "--mode", choices=("idle", "hands", "desk"), default="desk"
+        "--mode", choices=("idle", "desk"), default="desk"
     )
     parser.add_argument(
         "--camera-config", type=Path, default=ROOT / "config" / "camera.yaml"
