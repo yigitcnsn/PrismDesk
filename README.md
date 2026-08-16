@@ -146,6 +146,18 @@ python main.py desk
 
 HUD shows FPS number only, plus mat/object overlays. Vision + home-hub layers each run on their own thread.
 
+### Phone control (home-hub)
+
+With `python main.py desk` and home-hub running, open the **PrismDesk** page on your phone (same LAN as the hub).
+
+| Control | Effect |
+|---------|--------|
+| Desk / Idle | Projector HUD: measure overlays vs clock-only |
+| Stop | Ends the desk session (then idle HUD if `--then-idle`) |
+| Overlay toggles | Show/hide mat and object on the projector (and separately on the browser Final panel) |
+
+The desk polls `GET /api/prismdesk/config`. Stop is a one-shot command with a short TTL so it cannot kill the next session.
+
 ---
 
 ## Roadmap
@@ -158,6 +170,7 @@ HUD shows FPS number only, plus mat/object overlays. Vision + home-hub layers ea
 - [x] Projector HUD via ffplay/mpv
 - [x] Live `desk` mode: mat + object measure
 - [x] home-hub PrismDesk debug publisher (`--home-hub`)
+- [x] Phone control via home-hub (desk / idle / stop + overlay toggles)
 - [x] Camera ↔ projector homography (projected chessboard)
 
 ### Next

@@ -18,12 +18,12 @@ from typing import Any, Callable, List, Optional
 import cv2
 import numpy as np
 
-from src.core.home_hub import HomeHubPublisher, OverlayFlags
+from src.core.home_hub import HUB_COMMAND_STOP, HomeHubPublisher, OverlayFlags
 from src.measure.mat import MatConfig, detect_mat_corners
 from src.measure.object import analyze_object
 from src.measure.perspective import warp_to_mat_plane
 from src.measure.shape import ObjectAnalysis
-from src.vision.desk import draw_debug_camera, draw_desk_hud, format_object_metrics
+from src.vision.desk import draw_debug_camera, draw_desk_hud, draw_idle_hud, format_object_metrics
 from src.vision.homography import CamProjectorHomography
 from src.vision.undistort import Undistorter
 
@@ -60,9 +60,11 @@ class _Shared:
     object_lock: threading.Lock = field(default_factory=threading.Lock)
     analysis: Optional[ObjectAnalysis] = None
     last_metrics: str = ""
-    # Projector Visual flags (hub sync)
+    # Projector / browser Visual flags (hub + phone)
     overlay_lock: threading.Lock = field(default_factory=threading.Lock)
     projector_overlays: OverlayFlags = field(default_factory=OverlayFlags)
+    browser_overlays: OverlayFlags = field(default_factory=OverlayFlags)
+    mode: str = "desk"
     # Display pacing
     display_count: int = 0
     t0: float = field(default_factory=time.time)
@@ -94,6 +96,11 @@ class DeskRuntime:
                 mat=hub.projector_overlays.mat,
                 object=hub.projector_overlays.object,
             )
+            self._shared.browser_overlays = OverlayFlags(
+                mat=hub.browser_overlays.mat,
+                object=hub.browser_overlays.object,
+            )
+            self._shared.mode = hub.mode if hub.mode in ("desk", "idle") else "desk"
 
     def start(self) -> None:
         self._shared.t0 = time.time()
@@ -260,22 +267,26 @@ class DeskRuntime:
             with self._shared.object_lock:
                 analysis = self._shared.analysis
             with self._shared.overlay_lock:
+                mode = self._shared.mode
                 overlays = OverlayFlags(
                     mat=self._shared.projector_overlays.mat,
                     object=self._shared.projector_overlays.object,
                 )
             fps_live = self._fps()
-            draw_desk_hud(
-                hud,
-                mat_corners=mat,
-                mat_config=self._cfg.mat_config,
-                src_size=(frame.shape[1], frame.shape[0]),
-                fps_live=fps_live,
-                analysis=analysis if self._cfg.do_object else None,
-                measure_config=self._cfg.measure_config,
-                overlays=overlays,
-                homography=self._cfg.homography,
-            )
+            if mode == "idle":
+                draw_idle_hud(hud)
+            else:
+                draw_desk_hud(
+                    hud,
+                    mat_corners=mat,
+                    mat_config=self._cfg.mat_config,
+                    src_size=(frame.shape[1], frame.shape[0]),
+                    fps_live=fps_live,
+                    analysis=analysis if self._cfg.do_object else None,
+                    measure_config=self._cfg.measure_config,
+                    overlays=overlays,
+                    homography=self._cfg.homography,
+                )
             try:
                 self._show(hud)
             except Exception as vis_exc:  # noqa: BLE001
@@ -290,11 +301,20 @@ class DeskRuntime:
         every = max(0.2, float(self._cfg.hub_config_every))
         while not self._shared.stop.is_set():
             try:
-                flags = self._hub.fetch_config()
+                ctrl = self._hub.fetch_control()
                 with self._shared.overlay_lock:
                     self._shared.projector_overlays = OverlayFlags(
-                        mat=flags.mat, object=flags.object
+                        mat=ctrl.projector.mat, object=ctrl.projector.object
                     )
+                    self._shared.browser_overlays = OverlayFlags(
+                        mat=ctrl.browser.mat, object=ctrl.browser.object
+                    )
+                    self._shared.mode = ctrl.mode
+                if ctrl.command == HUB_COMMAND_STOP:
+                    print("home-hub: stop from phone", flush=True)
+                    self._hub.clear_command()
+                    self._shared.stop.set()
+                    break
             except Exception:
                 pass
             self._shared.stop.wait(every)
@@ -313,15 +333,19 @@ class DeskRuntime:
                     mat=self._shared.projector_overlays.mat,
                     object=self._shared.projector_overlays.object,
                 )
+                browser = OverlayFlags(
+                    mat=self._shared.browser_overlays.mat,
+                    object=self._shared.browser_overlays.object,
+                )
+                mode = self._shared.mode
             self._hub.projector_overlays = local
-            self._hub.browser_overlays = OverlayFlags(
-                mat=local.mat, object=local.object
-            )
+            self._hub.browser_overlays = browser
+            self._hub.mode = mode
             fps_live = self._fps()
             proj = self._hub.projector_overlays
-            browser = self._hub.browser_overlays
             state = {
                 "fps": round(fps_live, 2),
+                "mode": mode,
                 "mat_locked": mat_ok,
                 "object": (
                     format_object_metrics(analysis) if analysis is not None else None
@@ -336,6 +360,7 @@ class DeskRuntime:
                     "projector": proj.as_dict(),
                     "browser": browser.as_dict(),
                     "overlays": proj.as_dict(),
+                    "mode": mode,
                 },
                 "rotate": int(self._cfg.rotate_degrees),
             }
@@ -375,8 +400,8 @@ class DeskRuntime:
             analysis = self._shared.analysis
         with self._shared.overlay_lock:
             browser = OverlayFlags(
-                mat=self._shared.projector_overlays.mat,
-                object=self._shared.projector_overlays.object,
+                mat=self._shared.browser_overlays.mat,
+                object=self._shared.browser_overlays.object,
             )
         fps_live = self._fps()
         measure_cfg = self._cfg.measure_config

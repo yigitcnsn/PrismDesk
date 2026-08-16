@@ -716,9 +716,9 @@ def cmd_desk(args: argparse.Namespace) -> int:
     if hub is not None:
         print(
             f"home-hub: {hub_cfg.base_url} layers={','.join(hub.enabled_layers)} "
-            f"(each layer on its own thread)"
+            f"(each layer on its own thread; phone control via hub PrismDesk page)"
         )
-        hub.fetch_config()
+        hub.fetch_control()
 
     show = args.show if args.show != "auto" else "mpv"
     mpv: MpvFrameSink | None = None

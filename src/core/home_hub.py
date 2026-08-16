@@ -16,6 +16,7 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
@@ -27,6 +28,9 @@ MAX_FRAME_BYTES = 800 * 1024
 
 # Layer ids used by home-hub multi-panel debug UI.
 LAYER_IDS: tuple[str, ...] = ("raw", "mat", "object", "final")
+HUB_MODES: tuple[str, ...] = ("desk", "idle")
+HUB_COMMAND_STOP = "stop"
+HUB_COMMAND_TTL_S = 15.0
 
 
 @dataclass
@@ -62,6 +66,16 @@ class OverlayFlags:
             "mat": bool(self.mat),
             "object": bool(self.object),
         }
+
+
+@dataclass
+class HubControl:
+    """Phone / home-hub control snapshot polled by the desk."""
+
+    projector: OverlayFlags = field(default_factory=OverlayFlags)
+    browser: OverlayFlags = field(default_factory=OverlayFlags)
+    mode: str = "desk"
+    command: Optional[str] = None
 
 
 def overlay_config_payload(flags: OverlayFlags) -> dict[str, dict[str, bool]]:
@@ -147,6 +161,36 @@ def split_overlays_from_config(
     return projector, browser
 
 
+def _parse_command_at(raw: Any) -> Optional[float]:
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    text = raw.strip().replace("Z", "+00:00")
+    try:
+        stamp = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=timezone.utc)
+    return stamp.timestamp()
+
+
+def parse_hub_control(payload: Mapping[str, Any] | None) -> HubControl:
+    """Parse GET /api/prismdesk/config into overlays + phone commands."""
+    projector, browser = split_overlays_from_config(payload)
+    if not payload:
+        return HubControl(projector=projector, browser=browser)
+    mode = str(payload.get("mode") or "desk").strip().lower()
+    if mode not in HUB_MODES:
+        mode = "desk"
+    command = None
+    raw_cmd = payload.get("command")
+    if raw_cmd == HUB_COMMAND_STOP:
+        issued = _parse_command_at(payload.get("command_at") or payload.get("commandAt"))
+        if issued is not None and (time.time() - issued) <= HUB_COMMAND_TTL_S:
+            command = HUB_COMMAND_STOP
+    return HubControl(projector=projector, browser=browser, mode=mode, command=command)
+
+
 def overlays_from_config_payload(payload: Mapping[str, Any] | None) -> OverlayFlags:
     """Legacy helper: projector overlays (falls back to flat overlays)."""
     projector, _browser = split_overlays_from_config(payload)
@@ -154,13 +198,14 @@ def overlays_from_config_payload(payload: Mapping[str, Any] | None) -> OverlayFl
 
 
 class HomeHubPublisher:
-    """POST layer JPEGs + state; poll overlay config."""
+    """POST layer JPEGs + state; poll overlay / phone-control config."""
 
     def __init__(self, config: Optional[HomeHubConfig] = None) -> None:
         self.config = config or HomeHubConfig()
         # Separate surfaces: projector HUD vs browser debug composition.
         self.projector_overlays = OverlayFlags()
         self.browser_overlays = OverlayFlags()
+        self.mode = "desk"
         self._fail_streak = 0
         self._last_err = ""
         self._lock = threading.RLock()
@@ -184,20 +229,49 @@ class HomeHubPublisher:
         with self._lock:
             self._local_edit_until = time.monotonic() + max(0.0, float(hold_s))
 
-    def fetch_config(self) -> OverlayFlags:
+    def fetch_control(self) -> HubControl:
+        """GET hub config: overlays, HUD mode, one-shot phone commands."""
         url = f"{self.config.base_url}/api/prismdesk/config"
+        held = HubControl(
+            projector=self.projector_overlays,
+            browser=self.browser_overlays,
+            mode=self.mode,
+        )
         try:
             raw = self._request_json("GET", url)
             with self._lock:
                 if time.monotonic() < self._local_edit_until:
-                    return self.projector_overlays
-                self.projector_overlays, self.browser_overlays = split_overlays_from_config(
-                    raw if isinstance(raw, Mapping) else None
-                )
+                    return held
+                ctrl = parse_hub_control(raw if isinstance(raw, Mapping) else None)
+                self.projector_overlays = ctrl.projector
+                self.browser_overlays = ctrl.browser
+                self.mode = ctrl.mode
                 self._fail_streak = 0
+                return ctrl
         except Exception as exc:  # noqa: BLE001
             self._note_fail(exc)
-        return self.projector_overlays
+        return held
+
+    def fetch_config(self) -> OverlayFlags:
+        return self.fetch_control().projector
+
+    def patch_config(self, payload: Mapping[str, Any]) -> bool:
+        """PUT a partial config update (home-hub merges into current)."""
+        if not self.enabled:
+            return False
+        url = f"{self.config.base_url}/api/prismdesk/config"
+        try:
+            with self._lock:
+                self._put_json(url, dict(payload))
+                self._fail_streak = 0
+            return True
+        except Exception as exc:  # noqa: BLE001
+            self._note_fail(exc)
+            return False
+
+    def clear_command(self) -> bool:
+        """ACK a one-shot phone command so it does not replay."""
+        return self.patch_config({"command": None})
 
     def push_config(
         self,

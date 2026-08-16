@@ -7,14 +7,15 @@
 #   POST /api/prismdesk/state
 #   GET  /api/prismdesk/latest.jpg/<layer>
 #   GET  /api/prismdesk/latest.jpg      legacy alias for final
-#   GET  /api/prismdesk/config
+#   GET  /api/prismdesk/config         overlays + mode + phone command (desk polls)
+#   PUT  /api/prismdesk/config         phone/UI: overlays, mode=desk|idle, command=stop
 
 enabled: true
 base_url: http://127.0.0.1:3000
 
 # Publish annotated camera JPEG every N desk frames
 publish_every: 3
-# Poll overlay toggles from hub every N desk frames
+# Poll overlay / phone-control config from hub every N desk frames
 config_every: 30
 
 jpeg_quality: 75
